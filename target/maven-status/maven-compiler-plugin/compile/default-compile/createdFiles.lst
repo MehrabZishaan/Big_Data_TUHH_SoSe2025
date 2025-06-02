@@ -1,0 +1,17 @@
+com\example\flink\Main$3.class
+com\example\flink\Main.class
+com\example\flink\CalculateAverageSpeed.class
+com\example\flink\StoreInformationOperator.class
+com\example\flink\PropagateLocationToDashboard.class
+com\example\flink\NotifyDashboardOperators.class
+com\example\flink\PropagateToDashboard.class
+com\example\flink\TaxiSpeed.class
+com\example\flink\TaxiDistance.class
+com\example\flink\Main$2.class
+com\example\flink\Main$RedisExampleMapper.class
+com\example\flink\Main$1.class
+com\example\flink\TaxiData.class
+com\example\flink\TaxiAverageSpeed.class
+com\example\flink\CalculateSpeed.class
+com\example\flink\CalculateDistance.class
+com\example\flink\Main$4.class
