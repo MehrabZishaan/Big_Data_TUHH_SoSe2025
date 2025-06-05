@@ -27,7 +27,7 @@ public class Main {
     public static void main(String[] args) throws Exception {
         String kafkaBootstrap = null;
         String inputTopic     = null;
-        String redisHost      = null;
+        // String redisHost      = null;
 
         for (int i = 0; i < args.length; i++) {
             switch (args[i]) {
@@ -47,24 +47,15 @@ public class Main {
                         System.exit(1);
                     }
                     break;
-                case "--redis.host":
-                    if (i + 1 < args.length) {
-                        redisHost = args[++i];
-                    } else {
-                        System.err.println("Missing value for --redis.host");
-                        System.exit(1);
-                    }
-                    break;
                 default:
                     break;
             }
         }
 
-        if (kafkaBootstrap == null || inputTopic == null || redisHost == null) {
+        if (kafkaBootstrap == null || inputTopic == null) {
             System.err.println("Usage: Main "
                 + "--kafka.bootstrap.servers <host:port> "
-                + "--kafka.topic <topicName> "
-                + "--redis.host <redisHost>");
+                + "--kafka.topic <topicName>");
             System.exit(1);
         }
 
@@ -81,7 +72,7 @@ public class Main {
         );
         kafkaConsumer.setStartFromEarliest();
 
-        DataStream<String> rawStream = env.addSource(kafkaConsumer);
+        DataStream<String> rawStream = env.addSource(kafkaConsumer).name("Kafka Source");
 
 
         DataStream<TaxiData> taxiData = rawStream
@@ -93,24 +84,24 @@ public class Main {
                     System.err.println("Invalid line: " + line);
                     return null;
                 }
-            })
-            .filter(x -> x != null);
+            }).name("Parse Taxi Data")
+            .filter(x -> x != null).name("Filter Null Taxi Data");
 
         DataStream<String> storeOp = taxiData
             .keyBy(TaxiData::getTaxiId)
-            .process(new StoreInformationOperator());
+            .process(new StoreInformationOperator()).name("Store Information");
 
         DataStream<String> dashOp = taxiData
             .keyBy(TaxiData::getTaxiId)
-            .process(new PropagateToDashboard());
+            .process(new PropagateToDashboard()).name("Dashboard Propagation");
 
         DataStream<String> enriched = rawStream
             .keyBy(Main::parseTaxiId)
-            .map(new CalculateSpeed());
+            .map(new CalculateSpeed()).name("Calculate Speed");
 
         DataStream<TaxiDistance> dists = taxiData
             .keyBy(TaxiData::getTaxiId)
-            .map(new CalculateDistance());
+            .map(new CalculateDistance()).name("Calculate Distance");
 
         DataStream<TaxiSpeed> speeds = enriched
             .flatMap(new FlatMapFunction<String, TaxiSpeed>() {
@@ -125,11 +116,11 @@ public class Main {
                         out.collect(new TaxiSpeed(id, sp));
                     }
                 }
-            });
+            }).name("Extract Taxi Speed");
 
         DataStream<TaxiAverageSpeed> avgSpeeds = speeds
             .keyBy(TaxiSpeed::getTaxiId)
-            .map(new CalculateAverageSpeed());
+            .map(new CalculateAverageSpeed()).name("Calculate Average Speed");
 
         DataStream<Tuple2<String, String>> redisFeed = enriched
             .flatMap(new FlatMapFunction<String, Tuple2<String, String>>() {
@@ -146,44 +137,44 @@ public class Main {
                         out.collect(new Tuple2<>("speed_" + id, sp));
                     }
                 }
-            });
+            }).name("Extract Redis Feed");
 
-        FlinkJedisPoolConfig redisCfg = new FlinkJedisPoolConfig.Builder()
-            .setHost(redisHost)
-            .setPort(6379)
-            .build();
+        // FlinkJedisPoolConfig redisCfg = new FlinkJedisPoolConfig.Builder()
+        //     .setHost(redisHost)
+        //     .setPort(6379)
+        //     .build();
 
-        redisFeed.addSink(new RedisSink<>(redisCfg, new RedisExampleMapper()));
+        // redisFeed.addSink(new RedisSink<>(redisCfg, new RedisExampleMapper()));
 
-        avgSpeeds.addSink(new RedisSink<>(redisCfg, new RedisMapper<TaxiAverageSpeed>() {
-            @Override
-            public RedisCommandDescription getCommandDescription() {
-                return new RedisCommandDescription(RedisCommand.HSET, "average_speed");
-            }
-            @Override
-            public String getKeyFromData(TaxiAverageSpeed data) {
-                return "taxi_" + data.getTaxiId();
-            }
-            @Override
-            public String getValueFromData(TaxiAverageSpeed data) {
-                return String.valueOf(data.getAverageSpeed());
-            }
-        }));
+        // avgSpeeds.addSink(new RedisSink<>(redisCfg, new RedisMapper<TaxiAverageSpeed>() {
+        //     @Override
+        //     public RedisCommandDescription getCommandDescription() {
+        //         return new RedisCommandDescription(RedisCommand.HSET, "average_speed");
+        //     }
+        //     @Override
+        //     public String getKeyFromData(TaxiAverageSpeed data) {
+        //         return "taxi_" + data.getTaxiId();
+        //     }
+        //     @Override
+        //     public String getValueFromData(TaxiAverageSpeed data) {
+        //         return String.valueOf(data.getAverageSpeed());
+        //     }
+        // }));
 
-        dists.addSink(new RedisSink<>(redisCfg, new RedisMapper<TaxiDistance>() {
-            @Override
-            public RedisCommandDescription getCommandDescription() {
-                return new RedisCommandDescription(RedisCommand.HSET, "taxi_distance");
-            }
-            @Override
-            public String getKeyFromData(TaxiDistance data) {
-                return "taxi_" + data.getTaxiId();
-            }
-            @Override
-            public String getValueFromData(TaxiDistance data) {
-                return String.valueOf(data.getDistance());
-            }
-        }));
+        // dists.addSink(new RedisSink<>(redisCfg, new RedisMapper<TaxiDistance>() {
+        //     @Override
+        //     public RedisCommandDescription getCommandDescription() {
+        //         return new RedisCommandDescription(RedisCommand.HSET, "taxi_distance");
+        //     }
+        //     @Override
+        //     public String getKeyFromData(TaxiDistance data) {
+        //         return "taxi_" + data.getTaxiId();
+        //     }
+        //     @Override
+        //     public String getValueFromData(TaxiDistance data) {
+        //         return String.valueOf(data.getDistance());
+        //     }
+        // }));
 
         env.execute("Enrich Taxi Data with Speed Calculation");
     }

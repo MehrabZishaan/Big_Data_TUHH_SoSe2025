@@ -26,14 +26,6 @@ services:
     networks:
       - flink-net
 
-  redis:
-    image: redis:7.0
-    container_name: redis
-    ports:
-      - "6379:6379"
-    networks:
-      - flink-net
-
   flink-jobmanager:
     image: flink:1.17.1-scala_2.12-java11
     container_name: flink-jobmanager

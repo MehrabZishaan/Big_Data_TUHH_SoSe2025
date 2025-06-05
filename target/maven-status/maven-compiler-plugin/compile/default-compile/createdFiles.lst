@@ -1,4 +1,3 @@
-com\example\flink\Main$3.class
 com\example\flink\Main.class
 com\example\flink\CalculateAverageSpeed.class
 com\example\flink\StoreInformationOperator.class
@@ -14,4 +13,3 @@ com\example\flink\TaxiData.class
 com\example\flink\TaxiAverageSpeed.class
 com\example\flink\CalculateSpeed.class
 com\example\flink\CalculateDistance.class
-com\example\flink\Main$4.class
