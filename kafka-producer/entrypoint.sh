@@ -15,7 +15,7 @@ sleep 10 # Wait for Kafka to start
 
 # Run the Python script
 echo "Running data provider..."
-python3 /data_provider.py
+python3 /producer.py
 
 # Wait for Kafka and Zookeeper processes to finish
 wait $ZOOKEEPER_PID
