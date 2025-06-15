@@ -24,7 +24,7 @@ if not os.path.isdir(data_dir):
     raise RuntimeError(f"Directory not found: {data_dir!r}")
 
 topic = 'taxi_data'
-speed_factor = float(os.getenv("SPEED_FACTOR", "1.0"))
+speed_factor = float(os.getenv("SPEED_FACTOR", "1000.0"))
 
 for filename in os.listdir(data_dir):
     if not filename.endswith(".txt"):
