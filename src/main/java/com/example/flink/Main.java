@@ -111,15 +111,15 @@ public class Main {
 
         DataStream<TaxiSpeed> enriched = taxiData
                 .keyBy(TaxiData::getTaxiId)
-                .map(new CalculateSpeed()).name("Calculate Speed");
+                .process(new CalculateSpeed()).name("Calculate Speed");
 
         DataStream<TaxiDistance> dists = taxiData
                 .keyBy(TaxiData::getTaxiId)
-                .map(new CalculateDistance()).name("Calculate Distance");
+                .process(new CalculateDistance()).name("Calculate Distance");
 
-        DataStream<TaxiAverageSpeed> avgSpeeds = enriched
-                .keyBy(TaxiSpeed::getTaxiId)
-                .map(new CalculateAverageSpeed()).name("Calculate Average Speed");
+        DataStream<TaxiAverageSpeed> avgSpeeds = taxiData
+                .keyBy(TaxiData::getTaxiId)
+                .process(new CalculateAverageSpeed()).name("Calculate Average Speed");
 
         FlinkJedisPoolConfig redisCfg = new FlinkJedisPoolConfig.Builder()
                 .setHost(redisHost)
@@ -177,7 +177,7 @@ public class Main {
 
             @Override
             public String getValueFromData(TaxiDistance data) {
-                return String.valueOf(data.getDistance());
+                return String.format("%.2f", data.getDistance());
             }
         })).name("Redis Taxi Distance");
 
@@ -189,8 +189,8 @@ public class Main {
         if (f.length == 4) {
             String id = f[0].trim();
             long ts = parseTimestamp(f[1].trim());
-            double lat = Double.parseDouble(f[2].trim());
-            double lng = Double.parseDouble(f[3].trim());
+            double lat = Double.parseDouble(f[3].trim());
+            double lng = Double.parseDouble(f[2].trim());
             return new TaxiData(id, ts, lat, lng);
         } else {
             throw new IllegalArgumentException("Invalid line: " + line);
@@ -315,23 +315,29 @@ class TaxiAverageSpeed {
     }
 }
 
-class CalculateSpeed implements MapFunction<TaxiData, TaxiSpeed> {
-    TaxiData lastState = null;
+class CalculateSpeed extends KeyedProcessFunction<String, TaxiData, TaxiSpeed> {
+    private transient ValueState<TaxiData> lastState;
 
     @Override
-    public TaxiSpeed map(TaxiData current) {
-        if (lastState != null) {
-            double distance = haversine(lastState.getLatitude(), lastState.getLongitude(),
+    public void open(Configuration parameters) {
+        lastState = getRuntimeContext().getState(
+                new ValueStateDescriptor<>("lastState", TaxiData.class));
+    }
+
+    @Override
+    public void processElement(TaxiData current, Context ctx, Collector<TaxiSpeed> out) throws Exception {
+        TaxiData prev = lastState.value();
+        if (prev != null) {
+            double distance = haversine(prev.getLatitude(), prev.getLongitude(),
                     current.getLatitude(), current.getLongitude());
-            double timeDiffSec = (current.getTimestamp() - lastState.getTimestamp()) / 1000.0;
+            double timeDiffSec = (current.getTimestamp() - prev.getTimestamp()) / 1000.0;
 
             if (timeDiffSec > 0) {
                 double speed = (distance / timeDiffSec) * 3600;
-                return new TaxiSpeed(current.getTaxiId(), speed);
+                out.collect(new TaxiSpeed(current.getTaxiId(), speed));
             }
         }
-        lastState = current;
-        return new TaxiSpeed(current.getTaxiId(), 0.0);
+        lastState.update(current);
     }
 
     private double haversine(double lat1, double lon1, double lat2, double lon2) {
@@ -348,40 +354,101 @@ class CalculateSpeed implements MapFunction<TaxiData, TaxiSpeed> {
     }
 }
 
-class CalculateDistance implements MapFunction<TaxiData, TaxiDistance> {
-    @Override
-    public TaxiDistance map(TaxiData td) {
+class CalculateDistance extends KeyedProcessFunction<String, TaxiData, TaxiDistance> {
 
-        return new TaxiDistance(td.getTaxiId(), 0.0);
+    private transient ValueState<TaxiData> lastPoint;
+
+    private transient ValueState<Double> totalDistance;
+
+    @Override
+    public void open(Configuration parameters) throws Exception {
+        lastPoint = getRuntimeContext().getState(
+                new ValueStateDescriptor<>("lastPoint", TaxiData.class));
+
+        totalDistance = getRuntimeContext().getState(
+                new ValueStateDescriptor<>("totalDistance", Double.class));
+    }
+
+    @Override
+    public void processElement(TaxiData current, Context ctx, Collector<TaxiDistance> out) throws Exception {
+        TaxiData prev = lastPoint.value();
+        double totalDist = totalDistance.value() != null ? totalDistance.value() : 0.0;
+
+        if (prev != null) {
+            double dist = haversine(prev.getLatitude(), prev.getLongitude(), current.getLatitude(),
+                    current.getLongitude());
+            totalDist += dist;
+        }
+
+        lastPoint.update(current);
+        totalDistance.update(totalDist);
+
+        out.collect(new TaxiDistance(current.getTaxiId(), totalDist));
+    }
+
+    private double haversine(double lat1, double lon1, double lat2, double lon2) {
+        final int R = 6371;
+        double dLat = Math.toRadians(lat2 - lat1);
+        double dLon = Math.toRadians(lon2 - lon1);
+
+        double a = Math.sin(dLat / 2) * Math.sin(dLat / 2)
+                + Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2))
+                        * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+
+        double c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        return R * c;
     }
 }
 
-class CalculateAverageSpeed extends RichMapFunction<TaxiSpeed, TaxiAverageSpeed> {
+class CalculateAverageSpeed extends KeyedProcessFunction<String, TaxiData, TaxiAverageSpeed> {
 
-    private transient ValueState<Tuple2<Double, Integer>> sumAndCount;
+    private transient ValueState<TaxiData> firstPoint;
+    private transient ValueState<TaxiData> lastPoint;
+    private transient ValueState<Double> totalDistance;
 
     @Override
-    public void open(Configuration parameters) {
-        ValueStateDescriptor<Tuple2<Double, Integer>> descriptor = new ValueStateDescriptor<>("sumAndCount",
-                TypeInformation.of(new TypeHint<Tuple2<Double, Integer>>() {
-                }));
-        sumAndCount = getRuntimeContext().getState(descriptor);
+    public void open(Configuration parameters) throws Exception {
+        firstPoint = getRuntimeContext().getState(new ValueStateDescriptor<>("firstPoint", TaxiData.class));
+        lastPoint = getRuntimeContext().getState(new ValueStateDescriptor<>("lastPoint", TaxiData.class));
+        totalDistance = getRuntimeContext().getState(new ValueStateDescriptor<>("totalDistance", Double.class));
     }
 
     @Override
-    public TaxiAverageSpeed map(TaxiSpeed value) throws IOException {
-        Tuple2<Double, Integer> current = sumAndCount.value();
-        if (current == null) {
-            current = Tuple2.of(0.0, 0);
+    public void processElement(TaxiData current, Context ctx, Collector<TaxiAverageSpeed> out) throws Exception {
+        TaxiData first = firstPoint.value();
+        TaxiData last = lastPoint.value();
+        Double totalDist = totalDistance.value();
+
+        if (first == null) {
+            first = current;
+            totalDist = 0.0;
+        } else {
+            double dist = haversine(last.getLatitude(), last.getLongitude(), current.getLatitude(),
+                    current.getLongitude());
+            totalDist += dist;
         }
 
-        double newSum = current.f0 + value.getSpeed();
-        int newCount = current.f1 + 1;
-        double avg = newSum / newCount;
+        firstPoint.update(first);
+        lastPoint.update(current);
+        totalDistance.update(totalDist);
 
-        sumAndCount.update(Tuple2.of(newSum, newCount));
+        long timeDiffMs = current.getTimestamp() - first.getTimestamp();
+        if (timeDiffMs > 0) {
+            double hours = timeDiffMs / 3600000.0;
+            double avgSpeed = totalDist / hours;
+            out.collect(new TaxiAverageSpeed(current.getTaxiId(), avgSpeed));
+        }
+    }
 
-        return new TaxiAverageSpeed(value.getTaxiId(), avg);
+    private double haversine(double lat1, double lon1, double lat2, double lon2) {
+        final int R = 6371;
+        double dLat = Math.toRadians(lat2 - lat1);
+        double dLon = Math.toRadians(lon2 - lon1);
+        double a = Math.sin(dLat / 2) * Math.sin(dLat / 2)
+                + Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2))
+                        * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+        double c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        return R * c;
     }
 }
 
