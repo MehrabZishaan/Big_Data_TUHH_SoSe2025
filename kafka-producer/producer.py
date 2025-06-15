@@ -4,7 +4,7 @@ import os
 from confluent_kafka import Producer
 import time
 
-time.sleep(30) // The producer script waits until the kafka server is up and running 
+time.sleep(30)
 
 conf = {
     'bootstrap.servers': 'kafka:9092',
