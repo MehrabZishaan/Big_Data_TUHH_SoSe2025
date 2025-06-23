@@ -1,5 +1,6 @@
 package com.example.flink;
 
+// Core Flink APIs
 import org.apache.flink.api.common.functions.FlatMapFunction;
 import org.apache.flink.api.common.functions.MapFunction;
 import org.apache.flink.api.common.functions.RichMapFunction;
@@ -13,12 +14,15 @@ import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
+
+// Kafka and Redis connectors
 import org.apache.flink.streaming.connectors.kafka.FlinkKafkaConsumer;
 import org.apache.flink.streaming.connectors.redis.RedisSink;
 import org.apache.flink.streaming.connectors.redis.common.config.FlinkJedisPoolConfig;
 import org.apache.flink.streaming.connectors.redis.common.mapper.RedisCommand;
 import org.apache.flink.streaming.connectors.redis.common.mapper.RedisCommandDescription;
 import org.apache.flink.streaming.connectors.redis.common.mapper.RedisMapper;
+
 import org.apache.flink.util.Collector;
 
 import java.io.IOException;
@@ -29,6 +33,11 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Properties;
 
+/**
+ * Main entry point for the Flink application.
+ * Sets up Kafka consumer, processes taxi data, and writes results to Redis.
+ */
+
 public class Main {
     private static final SimpleDateFormat DATE_FORMAT = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
 
@@ -37,91 +46,67 @@ public class Main {
         String inputTopic = null;
         String redisHost = null;
 
+        // Parse command-line arguments
         for (int i = 0; i < args.length; i++) {
             switch (args[i]) {
                 case "--kafka.bootstrap.servers":
-                    if (i + 1 < args.length) {
-                        kafkaBootstrap = args[++i];
-                    } else {
-                        System.err.println("Missing value for --kafka.bootstrap.servers");
-                        System.exit(1);
-                    }
+                    kafkaBootstrap = args[++i];
                     break;
                 case "--kafka.topic":
-                    if (i + 1 < args.length) {
-                        inputTopic = args[++i];
-                    } else {
-                        System.err.println("Missing value for --kafka.topic");
-                        System.exit(1);
-                    }
+                    inputTopic = args[++i];
                     break;
                 case "--redis.host":
-                    if (i + 1 < args.length) {
-                        redisHost = args[++i];
-                    } else {
-                        System.err.println("Missing value for --redis.host");
-                        System.exit(1);
-                    }
-                    break;
-                default:
+                    redisHost = args[++i];
                     break;
             }
         }
 
-        if (kafkaBootstrap == null || inputTopic == null) {
-            System.err.println("Usage: Main "
-                    + "--kafka.bootstrap.servers <host:port> "
-                    + "--kafka.topic <topicName>");
+        if (kafkaBootstrap == null || inputTopic == null || redisHost == null) {
+            System.err.println("Usage: --kafka.bootstrap.servers <host:port> --kafka.topic <topic> --redis.host <host>");
             System.exit(1);
         }
 
+        // Set up Flink streaming environment
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
 
-        Properties consumerProps = new Properties();
-        consumerProps.setProperty("bootstrap.servers", kafkaBootstrap);
-        consumerProps.setProperty("group.id", "taxi-data-consumer");
+        // Configure Kafka consumer
+        Properties kafkaProps = new Properties();
+        kafkaProps.setProperty("bootstrap.servers", kafkaBootstrap);
+        kafkaProps.setProperty("group.id", "taxi-consumer");
 
         FlinkKafkaConsumer<String> kafkaConsumer = new FlinkKafkaConsumer<>(
-                inputTopic,
-                new SimpleStringSchema(),
-                consumerProps);
+                inputTopic, new SimpleStringSchema(), kafkaProps);
         kafkaConsumer.setStartFromEarliest();
 
-        DataStream<String> rawStream = env.addSource(kafkaConsumer).name("Kafka Source");
+        // Read from Kafka topic
+        DataStream<String> rawStream = env.addSource(kafkaConsumer);
 
-        DataStream<TaxiData> taxiData = rawStream
+        // Parse raw CSV lines into TaxiData objects
+        DataStream<TaxiData> taxiStream = rawStream
                 .map(line -> {
-                    String[] f = line.split(",");
-                    if (f.length == 4) {
-                        return parseTaxiData(line);
-                    } else {
-                        System.err.println("Invalid line: " + line);
-                        return null;
-                    }
-                }).name("Parse Taxi Data")
-                .filter(x -> x != null).name("Filter Null Taxi Data");
+                    String[] parts = line.split(",");
+                    if (parts.length != 4) return null;
+                    return parseTaxiData(parts);
+                })
+                .filter(data -> data != null);
 
-        DataStream<String> storeOp = taxiData
+        // Calculate speed per taxi
+        DataStream<TaxiSpeed> speedStream = taxiStream
                 .keyBy(TaxiData::getTaxiId)
-                .process(new StoreInformationOperator()).name("Store Information");
+                .process(new CalculateSpeed());
 
-        DataStream<String> dashOp = taxiData
+        // Calculate distance per taxi
+        DataStream<TaxiDistance> distanceStream = taxiStream
                 .keyBy(TaxiData::getTaxiId)
-                .process(new PropagateToDashboard()).name("Dashboard Propagation");
+                .process(new CalculateDistance());
 
-        DataStream<TaxiSpeed> enriched = taxiData
+        // Calculate average speed per taxi
+        DataStream<TaxiAverageSpeed> avgSpeedStream = taxiStream
                 .keyBy(TaxiData::getTaxiId)
-                .process(new CalculateSpeed()).name("Calculate Speed");
+                .process(new CalculateAverageSpeed());
 
-        DataStream<TaxiDistance> dists = taxiData
-                .keyBy(TaxiData::getTaxiId)
-                .process(new CalculateDistance()).name("Calculate Distance");
-
-        DataStream<TaxiAverageSpeed> avgSpeeds = taxiData
-                .keyBy(TaxiData::getTaxiId)
-                .process(new CalculateAverageSpeed()).name("Calculate Average Speed");
-
-        FlinkJedisPoolConfig redisCfg = new FlinkJedisPoolConfig.Builder()
+        // Configure Redis connection
+        FlinkJedisPoolConfig redisConfig = new FlinkJedisPoolConfig.Builder()
                 .setHost(redisHost)
                 .setPort(6379)
                 .build();
@@ -183,7 +168,8 @@ public class Main {
 
         env.execute("Enrich Taxi Data with Speed Calculation");
     }
-
+    
+    // Parse TaxiData from String array
     private static TaxiData parseTaxiData(String line) {
         String[] f = line.split(",");
         if (f.length == 4) {
