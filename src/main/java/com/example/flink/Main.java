@@ -34,8 +34,8 @@ import java.util.Map;
 import java.util.Properties;
 
 /**
- * Main entry point for the Flink application.
- * Sets up Kafka consumer, processes taxi data, and writes results to Redis.
+ * Main Flink pipeline for processing taxi data.
+ * Reads from Kafka, calculates speed, distance, and writes to Redis.
  */
 
 public class Main {
@@ -81,32 +81,35 @@ public class Main {
         // Read from Kafka topic
         DataStream<String> rawStream = env.addSource(kafkaConsumer);
 
-        // Parse raw CSV lines into TaxiData objects
-        DataStream<TaxiData> taxiStream = rawStream
+        DataStream<TaxiData> taxiData = rawStream
                 .map(line -> {
                     String[] parts = line.split(",");
-                    if (parts.length != 4) return null;
-                    return parseTaxiData(parts);
+                    if (parts.length == 4) {
+                        return parseTaxiData(parts);
+                    } else {
+                        System.err.println("Invalid line: " + line);
+                        return null;
+                    }
                 })
                 .filter(data -> data != null);
 
         // Calculate speed per taxi
-        DataStream<TaxiSpeed> speedStream = taxiStream
+        DataStream<TaxiSpeed> enriched = taxiData
                 .keyBy(TaxiData::getTaxiId)
                 .process(new CalculateSpeed());
 
         // Calculate distance per taxi
-        DataStream<TaxiDistance> distanceStream = taxiStream
+        DataStream<TaxiDistance> dists = taxiData
                 .keyBy(TaxiData::getTaxiId)
                 .process(new CalculateDistance());
 
         // Calculate average speed per taxi
-        DataStream<TaxiAverageSpeed> avgSpeedStream = taxiStream
+        DataStream<TaxiAverageSpeed> avgSpeeds = taxiData
                 .keyBy(TaxiData::getTaxiId)
                 .process(new CalculateAverageSpeed());
-
+        
         // Configure Redis connection
-        FlinkJedisPoolConfig redisConfig = new FlinkJedisPoolConfig.Builder()
+        FlinkJedisPoolConfig redisCfg = new FlinkJedisPoolConfig.Builder()
                 .setHost(redisHost)
                 .setPort(6379)
                 .build();
@@ -124,13 +127,27 @@ public class Main {
 
             @Override
             public String getValueFromData(TaxiData data) {
-                return String.format("{\"timestamp\":%d,\"latitude\":%.6f,\"longitude\":%.6f}",
+                return String.format("{\"timestamp\":%d,\"lat\":%.6f,\"lon\":%.6f}",
                         data.getTimestamp(), data.getLatitude(), data.getLongitude());
             }
-        })).name("Redis Taxi Data");
+        }));
 
-        enriched.addSink(new RedisSink<>(redisCfg, new RedisExampleMapper()))
-                .name("Redis Speed Data");
+        enriched.addSink(new RedisSink<>(redisCfg, new RedisMapper<TaxiSpeed>() {
+            @Override
+            public RedisCommandDescription getCommandDescription() {
+                return new RedisCommandDescription(RedisCommand.HSET, "taxi_speed");
+            }
+
+            @Override
+            public String getKeyFromData(TaxiSpeed data) {
+                return "taxi_" + data.getTaxiId();
+            }
+
+            @Override
+            public String getValueFromData(TaxiSpeed data) {
+                return String.format("%.2f", data.getSpeed());
+            }
+        }));
 
         avgSpeeds.addSink(new RedisSink<>(redisCfg, new RedisMapper<TaxiAverageSpeed>() {
             @Override
@@ -147,7 +164,7 @@ public class Main {
             public String getValueFromData(TaxiAverageSpeed data) {
                 return String.format("%.2f", data.getAverageSpeed());
             }
-        })).name("Redis Avg. Speed Data");
+        }));
 
         dists.addSink(new RedisSink<>(redisCfg, new RedisMapper<TaxiDistance>() {
             @Override
@@ -164,34 +181,32 @@ public class Main {
             public String getValueFromData(TaxiDistance data) {
                 return String.format("%.2f", data.getDistance());
             }
-        })).name("Redis Taxi Distance");
+        }));
 
-        env.execute("Enrich Taxi Data with Speed Calculation");
+        env.execute("Taxi Stream Processing");
     }
-    
-    // Parse TaxiData from String array
-    private static TaxiData parseTaxiData(String line) {
-        String[] f = line.split(",");
-        if (f.length == 4) {
-            String id = f[0].trim();
-            long ts = parseTimestamp(f[1].trim());
-            double lat = Double.parseDouble(f[3].trim());
-            double lng = Double.parseDouble(f[2].trim());
-            return new TaxiData(id, ts, lat, lng);
-        } else {
-            throw new IllegalArgumentException("Invalid line: " + line);
+
+    // Parse TaxiData
+    private static TaxiData parseTaxiData(String[] fields) {
+        try {
+            String id = fields[0].trim();
+            long timestamp = parseTimestamp(fields[1].trim());
+            double lon = Double.parseDouble(fields[2].trim());
+            double lat = Double.parseDouble(fields[3].trim());
+            return new TaxiData(id, timestamp, lat, lon);
+        } catch (Exception e) {
+            return null;
         }
     }
 
-    private static long parseTimestamp(String s) {
-        if (s.matches("\\d+")) {
-            return Long.parseLong(s);
+    private static long parseTimestamp(String input) {
+        if (input.matches("\\d+")) {
+            return Long.parseLong(input);
         }
         try {
-            Date d = DATE_FORMAT.parse(s);
-            return d.getTime();
+            return DATE_FORMAT.parse(input).getTime();
         } catch (ParseException e) {
-            throw new IllegalArgumentException("Bad timestamp: " + s, e);
+            return -1;
         }
     }
 
