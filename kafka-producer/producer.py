@@ -3,9 +3,6 @@ import pandas as pd
 import os
 from confluent_kafka import Producer
 
-# Wait for Kafka to become available (useful in Docker setups)
-time.sleep(30)
-
 # Kafka producer configuration
 conf = {
     'bootstrap.servers': 'kafka:9092',
