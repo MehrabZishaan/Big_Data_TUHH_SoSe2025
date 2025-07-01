@@ -48,6 +48,7 @@ def produce_file(file_path):
     df.sort_values(by='ts_ms', inplace=True)
 
     prev_ts = None
+    msg_count = 0
 
     for _, row in df.iterrows():
         current_ts = int(row['ts_ms'])
@@ -64,6 +65,10 @@ def produce_file(file_path):
         if not DRY_RUN:
             try:
                 producer.produce(TOPIC, key=str(row['taxiId']), value=message_value, callback=delivery_report)
+                producer.poll(0)
+                msg_count += 1
+                if msg_count % 100 == 0:
+                    producer.flush()
             except BufferError:
                 producer.flush()
                 producer.produce(TOPIC, key=str(row['taxiId']), value=message_value, callback=delivery_report)
