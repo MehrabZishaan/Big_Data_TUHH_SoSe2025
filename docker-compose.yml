@@ -9,6 +9,11 @@ services:
       - "2181:2181"
     networks:
       - flink-net
+    healthcheck:
+      test: ["CMD", "echo", "ruok", "|", "nc", "localhost", "2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   kafka:
     image: wurstmeister/kafka:2.13-2.7.0
@@ -22,9 +27,15 @@ services:
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
     depends_on:
-      - zookeeper
+      zookeeper:
+        condition: service_healthy
     networks:
       - flink-net
+    healthcheck:
+      test: ["CMD", "kafka-topics.sh", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
 
   flink-jobmanager:
     image: flink:1.17.1-scala_2.12-java11
@@ -35,7 +46,8 @@ services:
     environment:
       - JOB_MANAGER_RPC_ADDRESS=flink-jobmanager
     depends_on:
-      - kafka
+      kafka:
+        condition: service_healthy
     networks:
       - flink-net
 
@@ -54,7 +66,8 @@ services:
     build: ./kafka-producer
     container_name: kafka-producer
     depends_on:
-      - kafka
+      kafka:
+        condition: service_healthy
     environment:
       - KAFKA_BROKER=kafka:9092
     volumes:

@@ -8,5 +8,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY producer.py .
 COPY taxi_data ./taxi_data
 
-
 CMD ["python", "producer.py"]
