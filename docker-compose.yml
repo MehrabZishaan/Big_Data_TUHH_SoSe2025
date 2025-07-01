@@ -79,6 +79,7 @@ services:
       - ./kafka-producer/taxi_data:/taxi_data
     networks:
       - flink-net
+    restart: on-failure
 
   redis:
     image: redis:7.0
