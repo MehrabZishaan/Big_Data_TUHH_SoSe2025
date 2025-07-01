@@ -30,20 +30,13 @@ docker exec -it kafka bash
 Then inside the Kafka container:
 
 ```bash
-kafka-topics.sh --create --topic taxi_data \
-  --bootstrap-server localhost:9092 \
-  --replication-factor 1 \
-  --partitions 1
+kafka-topics.sh --create --topic taxi_data --bootstrap-server localhost:9092 --replication-factor 1 --partitions 1
 ```
 
 To check the first few messages (optional):
 
 ```bash
-kafka-console-consumer.sh \
-  --bootstrap-server localhost:9092 \
-  --topic taxi_data \
-  --from-beginning \
-  --max-messages 5
+kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic taxi_data --from-beginning --max-messages 5
 ```
 
 ### Step 3: Build the Flink Job
