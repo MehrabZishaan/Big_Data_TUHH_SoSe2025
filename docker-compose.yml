@@ -36,6 +36,8 @@ services:
       interval: 10s
       timeout: 10s
       retries: 5
+    volumes:
+      - kafka-data:/var/lib/kafka/data
 
   flink-jobmanager:
     image: flink:1.17.1-scala_2.12-java11
@@ -69,9 +71,12 @@ services:
       kafka:
         condition: service_healthy
     environment:
-      - KAFKA_BROKER=kafka:9092
+      - KAFKA_BOOTSTRAP=kafka:9092
+      - KAFKA_TOPIC=taxi_data
+      - DATA_DIR=/taxi_data
+      - SPEED_FACTOR=1.0
     volumes:
-    - ./kafka-producer/taxi_data:/taxi_data
+      - ./kafka-producer/taxi_data:/taxi_data
     networks:
       - flink-net
 
@@ -84,7 +89,13 @@ services:
       - "6379:6379"
     networks:
       - flink-net
+    volumes:
+      - redis-data:/data
 
 networks:
   flink-net:
     driver: bridge
+
+volumes:
+  kafka-data:
+  redis-data:
