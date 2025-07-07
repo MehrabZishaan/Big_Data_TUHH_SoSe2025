@@ -40,7 +40,7 @@ services:
       - kafka-data:/var/lib/kafka/data
 
   flink-jobmanager:
-    image: flink:1.17.1-scala_2.12-java11
+    build: ./flink-job
     container_name: flink-jobmanager
     command: jobmanager
     ports:

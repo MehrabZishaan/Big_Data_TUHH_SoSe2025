@@ -128,3 +128,30 @@ kafka-console-consumer.sh \
 - Redis holds the final values for querying or dashboard use
 
 Everything is now ready for real-time taxi tracking!
+
+
+
+## Regular Commands
+### Start everything and build all images:
+```bash
+docker-compose up --build
+```
+### If you changed anything inside flink-job/
+```bash
+docker-compose build flink-jobmanager
+docker-compose up -d flink-jobmanager
+```
+
+### OR rebuild all services cleanly:
+```bash
+docker-compose up --build -d
+```
+
+### Common Errors
+Frequent error on Windows
+`Ports are not available: listen tcp 0.0.0.0/50070: bind: An attempt was made to access a socket in a way forbidden by its access permissions`
+
+```bash
+net stop winnat
+net start winnat
+```
