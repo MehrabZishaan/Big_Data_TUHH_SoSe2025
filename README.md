@@ -155,3 +155,7 @@ Frequent error on Windows
 net stop winnat
 net start winnat
 ```
+### Run Flink Job
+```bash
+docker exec -it flink-jobmanager ./bin/flink run -c com.example.flink.Main /opt/flink/usrlib/taxi-flink-job-1.0-SNAPSHOT.jar --kafka.bootstrap.servers kafka:9092 --kafka.topic taxi_data --redis.host redis
+```

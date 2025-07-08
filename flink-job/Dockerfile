@@ -9,6 +9,3 @@ FROM flink:1.17.1-scala_2.12-java11
 
 # Copy the built JAR into the Flink job directory
 COPY --from=builder /app/target/taxi-flink-job-1.0-SNAPSHOT.jar /opt/flink/usrlib/
-
-# Optional: auto-submit the job on container start
-CMD ["bash","./bin/flink run -c com.example.flink.Main /opt/flink/usrlib/taxi-flink-job-1.0-SNAPSHOT.jar --kafka.bootstrap.servers kafka:9092 --kafka.topic taxi_data --redis.host redis"]
