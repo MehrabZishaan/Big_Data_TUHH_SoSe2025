@@ -5,6 +5,8 @@ import org.apache.flink.api.common.functions.FlatMapFunction;
 import org.apache.flink.api.common.functions.MapFunction;
 import org.apache.flink.api.common.functions.RichMapFunction;
 import org.apache.flink.api.common.serialization.SimpleStringSchema;
+import org.apache.flink.api.common.state.MapState;
+import org.apache.flink.api.common.state.MapStateDescriptor;
 import org.apache.flink.api.common.state.ValueState;
 import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.api.common.typeinfo.TypeHint;
@@ -26,6 +28,8 @@ import org.apache.flink.util.Collector;
 
 import com.example.flink.Main.TaxiData;
 import com.example.flink.Main.TaxiSpeed;
+import java.util.HashSet;
+import java.util.Set;
 
 import java.io.IOException;
 import java.text.ParseException;
@@ -184,6 +188,20 @@ public class Main {
                 })
                 .keyBy(t -> t.f0)
                 .sum(1);
+        // Calculate total distance of all taxis
+        DataStream<Tuple2<String, Double>> totalDistanceAllTaxis = distanceData
+                .keyBy(td -> "global_key") // Force same key for all
+                .process(new TotalDistanceCalculator());
+
+        // Count currently driving taxis
+        DataStream<Tuple2<String, Integer>> currentlyDrivingTaxis = taxiData
+                .keyBy(td -> "global_key")
+                .process(new ActiveTaxisCounter());
+        DataStream<Tuple2<String, String>> speedingIncidents = speedData
+                .filter(speed -> speed.getSpeed() > SPEED_LIMIT_KPH)
+                .map(speed -> Tuple2.of(speed.getTaxiId(), String.format("%.1f km/h", speed.getSpeed())))
+                .returns(new TypeHint<Tuple2<String, String>>() {
+                });
 
         // Store data in Redis
         taxiData.addSink(new RedisSink<>(redisCfg, new RedisTaxiLocationMapper()));
@@ -193,6 +211,10 @@ public class Main {
         allAlerts.addSink(new RedisSink<>(redisCfg, new RedisAlertMapper()));
         totalSpeedingTaxis.addSink(new RedisSink<>(redisCfg, new RedisTotalSpeedingMapper()));
         totalAreaViolations.addSink(new RedisSink<>(redisCfg, new RedisTotalAreaViolationsMapper()));
+
+        totalDistanceAllTaxis.addSink(new RedisSink<>(redisCfg, new RedisTotalDistanceMapper()));
+        currentlyDrivingTaxis.addSink(new RedisSink<>(redisCfg, new RedisActiveTaxisMapper()));
+        speedingIncidents.addSink(new RedisSink<>(redisCfg, new RedisSpeedingIncidentsMapper()));
         // Execute the Flink job
         env.execute("Taxi Fleet Monitoring Pipeline");
     }
@@ -222,6 +244,52 @@ public class Main {
         }
     }
 
+    // Calculates TOTAL DISTANCE of all taxis (stateful)
+    public static class TotalDistanceCalculator
+            extends KeyedProcessFunction<String, TaxiDistance, Tuple2<String, Double>> {
+        private transient ValueState<Double> totalDistanceState;
+
+        @Override
+        public void open(Configuration parameters) {
+            totalDistanceState = getRuntimeContext().getState(
+                    new ValueStateDescriptor<>("totalDistanceState", Double.class, 0.0));
+        }
+
+        @Override
+        public void processElement(TaxiDistance taxiDistance, Context ctx, Collector<Tuple2<String, Double>> out)
+                throws Exception {
+            double currentTotal = totalDistanceState.value() + taxiDistance.getDistance();
+            totalDistanceState.update(currentTotal);
+            out.collect(Tuple2.of("total_distance_all_taxis", currentTotal));
+        }
+    }
+
+    // Counts CURRENTLY DRIVING taxis (stateful)
+    public static class ActiveTaxisCounter extends KeyedProcessFunction<String, TaxiData, Tuple2<String, Integer>> {
+        private transient ValueState<Set<String>> activeTaxisState;
+
+        @Override
+        public void open(Configuration parameters) {
+            ValueStateDescriptor<Set<String>> descriptor = new ValueStateDescriptor<>("activeTaxisState",
+                    TypeInformation.of(new TypeHint<Set<String>>() {
+                    }));
+            activeTaxisState = getRuntimeContext().getState(descriptor);
+        }
+
+        @Override
+        public void processElement(
+                TaxiData taxiData,
+                Context ctx,
+                Collector<Tuple2<String, Integer>> out) throws Exception {
+            Set<String> currentSet = activeTaxisState.value();
+            if (currentSet == null) {
+                currentSet = new HashSet<>();
+            }
+            currentSet.add(taxiData.getTaxiId());
+            activeTaxisState.update(currentSet);
+            out.collect(Tuple2.of("currently_driving_taxis", currentSet.size()));
+        }
+    }
     // Redis mappers
 
     public static class RedisTotalSpeedingMapper implements RedisMapper<Tuple2<String, Integer>> {
@@ -340,6 +408,60 @@ public class Main {
         @Override
         public String getValueFromData(String data) {
             return data;
+        }
+    }
+
+    // For storing currently speeding taxis (HSET in Redis)
+    public static class RedisSpeedingIncidentsMapper implements RedisMapper<Tuple2<String, String>> {
+        @Override
+        public RedisCommandDescription getCommandDescription() {
+            return new RedisCommandDescription(RedisCommand.HSET, "speeding_incidents");
+        }
+
+        @Override
+        public String getKeyFromData(Tuple2<String, String> data) {
+            return data.f0;
+        } // taxi ID
+
+        @Override
+        public String getValueFromData(Tuple2<String, String> data) {
+            return data.f1;
+        } // speed value
+    }
+
+    // Redis mapper for total distance
+    public static class RedisTotalDistanceMapper implements RedisMapper<Tuple2<String, Double>> {
+        @Override
+        public RedisCommandDescription getCommandDescription() {
+            return new RedisCommandDescription(RedisCommand.SET, "total_distance_all_taxis");
+        }
+
+        @Override
+        public String getKeyFromData(Tuple2<String, Double> data) {
+            return data.f0;
+        }
+
+        @Override
+        public String getValueFromData(Tuple2<String, Double> data) {
+            return String.format("%.2f", data.f1);
+        }
+    }
+
+    // Redis mapper for active taxis count
+    public static class RedisActiveTaxisMapper implements RedisMapper<Tuple2<String, Integer>> {
+        @Override
+        public RedisCommandDescription getCommandDescription() {
+            return new RedisCommandDescription(RedisCommand.SET, "currently_driving_taxis");
+        }
+
+        @Override
+        public String getKeyFromData(Tuple2<String, Integer> data) {
+            return data.f0;
+        }
+
+        @Override
+        public String getValueFromData(Tuple2<String, Integer> data) {
+            return data.f1.toString();
         }
     }
 
