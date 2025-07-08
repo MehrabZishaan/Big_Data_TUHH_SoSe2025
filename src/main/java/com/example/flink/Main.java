@@ -168,6 +168,22 @@ public class Main {
 
         // Combine all alerts
         DataStream<String> allAlerts = speedingAlerts.union(geofenceAlerts);
+        // Calculate total speeding taxis (count)
+        DataStream<Tuple2<String, Integer>> totalSpeedingTaxis = speedData
+                .filter(speed -> speed.getSpeed() > SPEED_LIMIT_KPH)
+                .map(speed -> Tuple2.of("total_speeding", 1))
+                .returns(new TypeHint<Tuple2<String, Integer>>() {
+                })
+                .keyBy(t -> t.f0)
+                .sum(1);
+
+        // Calculate total area violations (count)
+        DataStream<Tuple2<String, Integer>> totalAreaViolations = geofenceAlerts
+                .map(alert -> Tuple2.of("total_violations", 1))
+                .returns(new TypeHint<Tuple2<String, Integer>>() {
+                })
+                .keyBy(t -> t.f0)
+                .sum(1);
 
         // Store data in Redis
         taxiData.addSink(new RedisSink<>(redisCfg, new RedisTaxiLocationMapper()));
@@ -175,7 +191,8 @@ public class Main {
         avgSpeedData.addSink(new RedisSink<>(redisCfg, new RedisAverageSpeedMapper()));
         distanceData.addSink(new RedisSink<>(redisCfg, new RedisDistanceMapper()));
         allAlerts.addSink(new RedisSink<>(redisCfg, new RedisAlertMapper()));
-
+        totalSpeedingTaxis.addSink(new RedisSink<>(redisCfg, new RedisTotalSpeedingMapper()));
+        totalAreaViolations.addSink(new RedisSink<>(redisCfg, new RedisTotalAreaViolationsMapper()));
         // Execute the Flink job
         env.execute("Taxi Fleet Monitoring Pipeline");
     }
@@ -206,6 +223,41 @@ public class Main {
     }
 
     // Redis mappers
+
+    public static class RedisTotalSpeedingMapper implements RedisMapper<Tuple2<String, Integer>> {
+        @Override
+        public RedisCommandDescription getCommandDescription() {
+            return new RedisCommandDescription(RedisCommand.SET, "total_speeding_taxis");
+        }
+
+        @Override
+        public String getKeyFromData(Tuple2<String, Integer> data) {
+            return "total_speeding_taxis";
+        }
+
+        @Override
+        public String getValueFromData(Tuple2<String, Integer> data) {
+            return data.f1.toString();
+        }
+    }
+
+    public static class RedisTotalAreaViolationsMapper implements RedisMapper<Tuple2<String, Integer>> {
+        @Override
+        public RedisCommandDescription getCommandDescription() {
+            return new RedisCommandDescription(RedisCommand.SET, "total_area_violations");
+        }
+
+        @Override
+        public String getKeyFromData(Tuple2<String, Integer> data) {
+            return "total_area_violations";
+        }
+
+        @Override
+        public String getValueFromData(Tuple2<String, Integer> data) {
+            return data.f1.toString();
+        }
+    }
+
     public static class RedisTaxiLocationMapper implements RedisMapper<TaxiData> {
         @Override
         public RedisCommandDescription getCommandDescription() {
