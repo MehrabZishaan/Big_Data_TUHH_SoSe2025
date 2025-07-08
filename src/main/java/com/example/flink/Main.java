@@ -24,6 +24,9 @@ import org.apache.flink.streaming.connectors.redis.common.mapper.RedisCommandDes
 import org.apache.flink.streaming.connectors.redis.common.mapper.RedisMapper;
 import org.apache.flink.util.Collector;
 
+import com.example.flink.Main.TaxiData;
+import com.example.flink.Main.TaxiSpeed;
+
 import java.io.IOException;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
@@ -38,6 +41,12 @@ import java.util.Properties;
  */
 public class Main {
     private static final SimpleDateFormat DATE_FORMAT = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+    private static final SimpleDateFormat ALERT_DATE_FORMAT = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+    private static final double FORBIDDEN_CITY_LAT = 39.916;
+    private static final double FORBIDDEN_CITY_LON = 116.397;
+    private static final double WARNING_RADIUS_KM = 10.0;
+    private static final double DROP_RADIUS_KM = 15.0;
+    private static final double SPEED_LIMIT_KPH = 50.0;
 
     public static void main(String[] args) throws Exception {
         String kafkaBootstrap = null;
@@ -140,9 +149,16 @@ public class Main {
 
         // Detect speeding violations
         DataStream<String> speedingAlerts = speedData
-                .filter(speed -> speed.getSpeed() > 50.0)
-                .map(speed -> String.format("SPEEDING: Taxi %s at %.1f km/h",
-                        speed.getTaxiId(), speed.getSpeed()));
+                .filter(speed -> speed.getSpeed() > SPEED_LIMIT_KPH)
+                .map(speed -> {
+                    String timeStr = ALERT_DATE_FORMAT.format(new Date(speed.getTimestamp()));
+                    return String.format(
+                            "SPEEDING: Taxi %s at %.1f km/h (limit: %.1f) at %s",
+                            speed.getTaxiId(),
+                            speed.getSpeed(),
+                            SPEED_LIMIT_KPH,
+                            timeStr);
+                });
 
         // Detect geofence violations
         DataStream<String> geofenceAlerts = taxiData
@@ -309,10 +325,12 @@ public class Main {
     public static class TaxiSpeed {
         private final String taxiId;
         private final double speed;
+        private final long timestamp;
 
-        public TaxiSpeed(String taxiId, double speed) {
+        public TaxiSpeed(String taxiId, double speed, long timestamp) {
             this.taxiId = taxiId;
             this.speed = speed;
+            this.timestamp = timestamp;
         }
 
         public String getTaxiId() {
@@ -321,6 +339,10 @@ public class Main {
 
         public double getSpeed() {
             return speed;
+        }
+
+        public long getTimestamp() {
+            return timestamp;
         }
     }
 
@@ -374,13 +396,18 @@ public class Main {
         public void processElement(TaxiData current, Context ctx, Collector<TaxiSpeed> out) throws Exception {
             TaxiData prev = lastState.value();
             if (prev != null) {
-                double distance = haversine(prev.getLatitude(), prev.getLongitude(),
+                double distance = haversine(
+                        prev.getLatitude(), prev.getLongitude(),
                         current.getLatitude(), current.getLongitude());
                 double timeDiffSec = (current.getTimestamp() - prev.getTimestamp()) / 1000.0;
 
                 if (timeDiffSec > 0) {
-                    double speed = (distance / timeDiffSec) * 3600;
-                    out.collect(new TaxiSpeed(current.getTaxiId(), speed));
+                    double speed = (distance / timeDiffSec) * 3600; // km/h
+                    out.collect(new TaxiSpeed(
+                            current.getTaxiId(),
+                            speed,
+                            current.getTimestamp() // Pass current timestamp
+                    ));
                 }
             }
             lastState.update(current);
@@ -390,12 +417,13 @@ public class Main {
             final int R = 6371;
             double dLat = Math.toRadians(lat2 - lat1);
             double dLon = Math.toRadians(lon2 - lon1);
-            double a = Math.sin(dLat / 2) * Math.sin(dLat / 2)
-                    + Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2))
-                            * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+            double a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                    Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2)) *
+                            Math.sin(dLon / 2) * Math.sin(dLon / 2);
             double c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
             return R * c;
         }
+
     }
 
     public static class CalculateDistance extends KeyedProcessFunction<String, TaxiData, TaxiDistance> {
@@ -493,31 +521,41 @@ public class Main {
     }
 
     public static class GeofenceMonitor extends KeyedProcessFunction<String, TaxiData, String> {
-        private static final double CENTER_LAT = 39.916;
-        private static final double CENTER_LON = 116.397;
-        private static final double WARNING_RADIUS = 10.0;
-        private static final double DROP_RADIUS = 15.0;
+        // Constants for Forbidden City coordinates and thresholds
+        private static final double FORBIDDEN_CITY_LAT = 39.916; // Latitude of Forbidden City
+        private static final double FORBIDDEN_CITY_LON = 116.397; // Longitude of Forbidden City
+        private static final double WARNING_RADIUS_KM = 10.0; // Warning zone starts at 10km
+        private static final double DROP_RADIUS_KM = 15.0; // Discard taxis beyond 15km
 
         @Override
-        public void processElement(TaxiData value, Context ctx, Collector<String> out) throws Exception {
-            double distance = haversine(CENTER_LAT, CENTER_LON,
-                    value.getLatitude(), value.getLongitude());
+        public void processElement(TaxiData taxi, Context ctx, Collector<String> out) throws Exception {
+            double distance = haversine(
+                    FORBIDDEN_CITY_LAT, FORBIDDEN_CITY_LON,
+                    taxi.getLatitude(), taxi.getLongitude());
 
-            if (distance > WARNING_RADIUS && distance <= DROP_RADIUS) {
-                out.collect(String.format("GEOFENCE: Taxi %s %.1f km from center",
-                        value.getTaxiId(), distance));
+            if (distance > WARNING_RADIUS_KM && distance <= DROP_RADIUS_KM) {
+                String timeStr = ALERT_DATE_FORMAT.format(new Date(taxi.getTimestamp()));
+                out.collect(String.format(
+                        "GEOFENCE: Taxi %s at (%.6f,%.6f) is %.1f km from center at %s",
+                        taxi.getTaxiId(),
+                        taxi.getLatitude(), taxi.getLongitude(),
+                        distance,
+                        timeStr));
             }
         }
 
+        // Haversine formula to calculate distance between two GPS points
         private double haversine(double lat1, double lon1, double lat2, double lon2) {
-            final int R = 6371;
+            final int R = 6371; // Earth's radius in km
             double dLat = Math.toRadians(lat2 - lat1);
             double dLon = Math.toRadians(lon2 - lon1);
+
             double a = Math.sin(dLat / 2) * Math.sin(dLat / 2)
                     + Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2))
                             * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+
             double c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-            return R * c;
+            return R * c; // Distance in km
         }
     }
 }
