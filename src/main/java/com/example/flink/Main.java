@@ -30,6 +30,8 @@ import com.example.flink.Main.TaxiData;
 import com.example.flink.Main.TaxiSpeed;
 import java.util.HashSet;
 import java.util.Set;
+import redis.clients.jedis.Jedis;
+import org.apache.flink.streaming.api.functions.sink.SinkFunction;
 
 import java.io.IOException;
 import java.text.ParseException;
@@ -198,7 +200,6 @@ public class Main {
                 .keyBy(td -> "global_key")
                 .process(new ActiveTaxisCounter());
         DataStream<Tuple2<String, String>> speedingIncidents = speedData
-                .filter(speed -> speed.getSpeed() > SPEED_LIMIT_KPH)
                 .map(speed -> Tuple2.of(speed.getTaxiId(), String.format("%.1f km/h", speed.getSpeed())))
                 .returns(new TypeHint<Tuple2<String, String>>() {
                 });
@@ -214,7 +215,12 @@ public class Main {
 
         totalDistanceAllTaxis.addSink(new RedisSink<>(redisCfg, new RedisTotalDistanceMapper()));
         currentlyDrivingTaxis.addSink(new RedisSink<>(redisCfg, new RedisActiveTaxisMapper()));
-        speedingIncidents.addSink(new RedisSink<>(redisCfg, new RedisSpeedingIncidentsMapper()));
+        // speedingIncidents.addSink(new RedisSink<>(redisCfg, new
+        // RedisSpeedingIncidentsMapper()));
+        speedingIncidents
+                .keyBy(data -> data.f0) // key by taxiId
+                .process(new SpeedingIncidentTracker(redisHost));
+
         // Execute the Flink job
         env.execute("Taxi Fleet Monitoring Pipeline");
     }
@@ -245,6 +251,40 @@ public class Main {
     }
 
     // Calculates TOTAL DISTANCE of all taxis (stateful)
+    public static class SpeedingIncidentTracker extends KeyedProcessFunction<String, Tuple2<String, String>, Void> {
+        private final String redisHost;
+        private transient ValueState<Boolean> wasSpeeding;
+
+        public SpeedingIncidentTracker(String redisHost) {
+            this.redisHost = redisHost;
+        }
+
+        @Override
+        public void open(Configuration parameters) {
+            ValueStateDescriptor<Boolean> desc = new ValueStateDescriptor<>("wasSpeeding", Boolean.class);
+            wasSpeeding = getRuntimeContext().getState(desc);
+        }
+
+        @Override
+        public void processElement(Tuple2<String, String> data, Context ctx, Collector<Void> out) throws Exception {
+            double speed = Double.parseDouble(data.f1.replace(" km/h", ""));
+            boolean isSpeedingNow = speed > SPEED_LIMIT_KPH;
+            Boolean prevState = wasSpeeding.value();
+
+            try (Jedis jedis = new Jedis(redisHost)) {
+                if (Boolean.TRUE.equals(prevState) && !isSpeedingNow) {
+                    // Taxi has stopped speeding -> remove from Redis
+                    jedis.hdel("speeding_incidents", data.f0);
+                } else if (!Boolean.TRUE.equals(prevState) && isSpeedingNow) {
+                    // Taxi started speeding -> add to Redis
+                    jedis.hset("speeding_incidents", data.f0, data.f1);
+                }
+            }
+
+            wasSpeeding.update(isSpeedingNow);
+        }
+    }
+
     public static class TotalDistanceCalculator
             extends KeyedProcessFunction<String, TaxiDistance, Tuple2<String, Double>> {
         private transient ValueState<Double> totalDistanceState;
@@ -261,6 +301,26 @@ public class Main {
             double currentTotal = totalDistanceState.value() + taxiDistance.getDistance();
             totalDistanceState.update(currentTotal);
             out.collect(Tuple2.of("total_distance_all_taxis", currentTotal));
+        }
+    }
+
+    public static class CurrentSpeedingSink implements SinkFunction<Tuple2<String, String>> {
+        private final String redisHost;
+
+        public CurrentSpeedingSink(String redisHost) {
+            this.redisHost = redisHost;
+        }
+
+        @Override
+        public void invoke(Tuple2<String, String> data, Context context) throws Exception {
+            try (Jedis jedis = new Jedis(redisHost)) {
+                double speed = Double.parseDouble(data.f1.replace(" km/h", ""));
+                if (speed > SPEED_LIMIT_KPH) {
+                    jedis.hset("speeding_incidents", data.f0, data.f1);
+                } else {
+                    jedis.hdel("speeding_incidents", data.f0);
+                }
+            }
         }
     }
 
@@ -733,3 +793,11 @@ public class Main {
         }
     }
 }
+
+
+
+
+
+
+
+
