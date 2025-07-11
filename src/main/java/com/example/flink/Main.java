@@ -171,7 +171,14 @@ public class Main {
                 .keyBy(TaxiData::getTaxiId)
                 .process(new GeofenceMonitor())
                 .filter(alert -> alert != null);
+        DataStream<Tuple2<String, Boolean>> geofenceViolations = taxiData
+                .keyBy(TaxiData::getTaxiId)
+                .process(new ViolationDetector());
 
+        // Track current violators
+        geofenceViolations
+                .keyBy(data -> data.f0)
+                .process(new ViolationTracker(redisHost));
         // Combine all alerts
         DataStream<String> allAlerts = speedingAlerts.union(geofenceAlerts);
         // Calculate total speeding taxis (count)
@@ -285,6 +292,69 @@ public class Main {
         }
     }
 
+    public static class ViolationDetector extends KeyedProcessFunction<String, TaxiData, Tuple2<String, Boolean>> {
+        private static final double FORBIDDEN_CITY_LAT = 39.916;
+        private static final double FORBIDDEN_CITY_LON = 116.397;
+        private static final double WARNING_RADIUS_KM = 10.0;
+        private static final double DROP_RADIUS_KM = 15.0;
+
+        @Override
+        public void processElement(TaxiData taxi, Context ctx, Collector<Tuple2<String, Boolean>> out)
+                throws Exception {
+            double distance = haversine(
+                    FORBIDDEN_CITY_LAT, FORBIDDEN_CITY_LON,
+                    taxi.getLatitude(), taxi.getLongitude());
+
+            boolean isViolating = (distance > WARNING_RADIUS_KM && distance <= DROP_RADIUS_KM);
+            out.collect(Tuple2.of(taxi.getTaxiId(), isViolating));
+        }
+
+        private double haversine(double lat1, double lon1, double lat2, double lon2) {
+            final int R = 6371;
+            double dLat = Math.toRadians(lat2 - lat1);
+            double dLon = Math.toRadians(lon2 - lon1);
+            double a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                    Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2)) *
+                            Math.sin(dLon / 2) * Math.sin(dLon / 2);
+            double c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+            return R * c;
+        }
+    }
+
+    public static class ViolationTracker extends KeyedProcessFunction<String, Tuple2<String, Boolean>, Void> {
+        private final String redisHost;
+        private transient ValueState<Boolean> wasViolating;
+
+        public ViolationTracker(String redisHost) {
+            this.redisHost = redisHost;
+        }
+
+        @Override
+        public void open(Configuration parameters) {
+            ValueStateDescriptor<Boolean> desc = new ValueStateDescriptor<>("wasViolating", Boolean.class);
+            wasViolating = getRuntimeContext().getState(desc);
+        }
+
+        @Override
+        public void processElement(Tuple2<String, Boolean> data, Context ctx, Collector<Void> out) throws Exception {
+            boolean isViolatingNow = data.f1;
+            Boolean prevState = wasViolating.value();
+
+            try (Jedis jedis = new Jedis(redisHost)) {
+                if (Boolean.TRUE.equals(prevState) && !isViolatingNow) {
+                    // Taxi has stopped violating -> remove from Redis
+                    jedis.hdel("current_violations", data.f0);
+                } else if (!Boolean.TRUE.equals(prevState) && isViolatingNow) {
+                    // Taxi started violating -> add to Redis
+                    String value = String.format("%d", System.currentTimeMillis());
+                    jedis.hset("current_violations", data.f0, value);
+                }
+            }
+
+            wasViolating.update(isViolatingNow);
+        }
+    }
+
     public static class TotalDistanceCalculator
             extends KeyedProcessFunction<String, TaxiDistance, Tuple2<String, Double>> {
         private transient ValueState<Double> totalDistanceState;
@@ -350,7 +420,24 @@ public class Main {
             out.collect(Tuple2.of("currently_driving_taxis", currentSet.size()));
         }
     }
+
     // Redis mappers
+    public static class RedisCurrentViolationsMapper implements RedisMapper<Tuple2<String, String>> {
+        @Override
+        public RedisCommandDescription getCommandDescription() {
+            return new RedisCommandDescription(RedisCommand.HSET, "current_violations");
+        }
+
+        @Override
+        public String getKeyFromData(Tuple2<String, String> data) {
+            return data.f0;
+        }
+
+        @Override
+        public String getValueFromData(Tuple2<String, String> data) {
+            return data.f1;
+        }
+    }
 
     public static class RedisTotalSpeedingMapper implements RedisMapper<Tuple2<String, Integer>> {
         @Override
@@ -755,49 +842,37 @@ public class Main {
     }
 
     public static class GeofenceMonitor extends KeyedProcessFunction<String, TaxiData, String> {
-        // Constants for Forbidden City coordinates and thresholds
-        private static final double FORBIDDEN_CITY_LAT = 39.916; // Latitude of Forbidden City
-        private static final double FORBIDDEN_CITY_LON = 116.397; // Longitude of Forbidden City
-        private static final double WARNING_RADIUS_KM = 10.0; // Warning zone starts at 10km
-        private static final double DROP_RADIUS_KM = 15.0; // Discard taxis beyond 15km
+    private static final double FORBIDDEN_CITY_LAT = 39.916;
+    private static final double FORBIDDEN_CITY_LON = 116.397;
+    private static final double WARNING_RADIUS_KM = 10.0;
+    private static final double DROP_RADIUS_KM = 15.0;
 
-        @Override
-        public void processElement(TaxiData taxi, Context ctx, Collector<String> out) throws Exception {
-            double distance = haversine(
-                    FORBIDDEN_CITY_LAT, FORBIDDEN_CITY_LON,
-                    taxi.getLatitude(), taxi.getLongitude());
+    @Override
+    public void processElement(TaxiData taxi, Context ctx, Collector<String> out) throws Exception {
+        double distance = haversine(
+                FORBIDDEN_CITY_LAT, FORBIDDEN_CITY_LON,
+                taxi.getLatitude(), taxi.getLongitude());
 
-            if (distance > WARNING_RADIUS_KM && distance <= DROP_RADIUS_KM) {
-                String timeStr = ALERT_DATE_FORMAT.format(new Date(taxi.getTimestamp()));
-                out.collect(String.format(
-                        "GEOFENCE: Taxi %s at (%.6f,%.6f) is %.1f km from center at %s",
-                        taxi.getTaxiId(),
-                        taxi.getLatitude(), taxi.getLongitude(),
-                        distance,
-                        timeStr));
-            }
-        }
-
-        // Haversine formula to calculate distance between two GPS points
-        private double haversine(double lat1, double lon1, double lat2, double lon2) {
-            final int R = 6371; // Earth's radius in km
-            double dLat = Math.toRadians(lat2 - lat1);
-            double dLon = Math.toRadians(lon2 - lon1);
-
-            double a = Math.sin(dLat / 2) * Math.sin(dLat / 2)
-                    + Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2))
-                            * Math.sin(dLon / 2) * Math.sin(dLon / 2);
-
-            double c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-            return R * c; // Distance in km
+        if (distance > WARNING_RADIUS_KM && distance <= DROP_RADIUS_KM) {
+            String timeStr = ALERT_DATE_FORMAT.format(new Date(taxi.getTimestamp()));
+            out.collect(String.format(
+                    "GEOFENCE: Taxi %s at (%.6f,%.6f) is %.1f km from center at %s",
+                    taxi.getTaxiId(),
+                    taxi.getLatitude(), taxi.getLongitude(),
+                    distance,
+                    timeStr));
         }
     }
+
+    private double haversine(double lat1, double lon1, double lat2, double lon2) {
+        final int R = 6371;
+        double dLat = Math.toRadians(lat2 - lat1);
+        double dLon = Math.toRadians(lon2 - lon1);
+        double a = Math.sin(dLat / 2) * Math.sin(dLat / 2)
+                + Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2))
+                        * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+        double c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        return R * c;
+    }
 }
-
-
-
-
-
-
-
-
+}
