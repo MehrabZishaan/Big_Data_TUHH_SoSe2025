@@ -36,6 +36,8 @@ import java.util.Date;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Properties;
+import java.util.Set;
+import java.util.HashSet;
 
 /**
  * Main Flink pipeline for processing taxi data.
@@ -105,26 +107,31 @@ public class Main {
                 .filter(data -> data != null)
                 .name("Parse Taxi Data");
 
+            DataStream<TaxiData> filteredTaxiData = taxiData
+            .keyBy(TaxiData::getTaxiId)
+            .process(new FilterTaxisByArea())
+            .name("Filter Taxis by Area");
+
         // Store information operator
-        DataStream<String> storeInfo = taxiData
+        DataStream<String> storeInfo = filteredTaxiData
                 .keyBy(TaxiData::getTaxiId)
                 .process(new StoreInformationOperator())
                 .name("Store Information");
 
         // Propagate to dashboard operator
-        DataStream<String> propagateDashboard = taxiData
-                .keyBy(TaxiData::getTaxiId)
+        DataStream<String> propagateDashboard = filteredTaxiData
+                .keyBy(td -> "global_key")
                 .process(new PropagateToDashboard())
                 .name("Propagate Information to Dashboard");
 
         // Calculate speed per taxi
-        DataStream<TaxiSpeed> enriched = taxiData
+        DataStream<TaxiSpeed> enriched = filteredTaxiData
                 .keyBy(TaxiData::getTaxiId)
                 .process(new CalculateSpeed())
                 .name("Calculate Speed");
 
         // Calculate distance per taxi
-        DataStream<TaxiDistance> dists = taxiData
+        DataStream<TaxiDistance> dists = filteredTaxiData
                 .keyBy(TaxiData::getTaxiId)
                 .process(new CalculateDistance())
                 .name("Calculate Distance");
@@ -136,13 +143,13 @@ public class Main {
                 .name("Calculate Average Speed");
 
         // Propagate location to dashboard (every 5 seconds)
-        DataStream<String> locationDashboard = taxiData
+        DataStream<String> locationDashboard = filteredTaxiData
                 .keyBy(TaxiData::getTaxiId)
                 .process(new PropagateLocationToDashboard())
                 .name("Propagate Location Information to Dashboard");
 
         // Notify dashboard operators (speeding and area violations)
-        DataStream<String> notifications = taxiData
+        DataStream<String> notifications = filteredTaxiData
                 .keyBy(TaxiData::getTaxiId)
                 .process(new NotifyDashboardOperators())
                 .name("Notify Dashboard Once");
@@ -154,7 +161,7 @@ public class Main {
                 .build();
 
         // Sink for taxi location data
-        taxiData.addSink(new RedisSink<>(redisCfg, new RedisMapper<TaxiData>() {
+        filteredTaxiData.addSink(new RedisSink<>(redisCfg, new RedisMapper<TaxiData>() {
             @Override
             public RedisCommandDescription getCommandDescription() {
                 return new RedisCommandDescription(RedisCommand.HSET, "taxi_location");
@@ -170,7 +177,7 @@ public class Main {
                 return String.format("{\"timestamp\":%d,\"lat\":%.6f,\"lon\":%.6f}",
                         data.getTimestamp(), data.getLatitude(), data.getLongitude());
             }
-        }));
+    }));
 
         // Sink for speed data
         enriched.addSink(new RedisSink<>(redisCfg, new RedisMapper<TaxiSpeed>() {
@@ -288,9 +295,9 @@ public class Main {
         try {
             String id = fields[0].trim();
             long timestamp = parseTimestamp(fields[1].trim());
-            double lat = Double.parseDouble(fields[2].trim());
-            double lon = Double.parseDouble(fields[3].trim());
-            return new TaxiData(id, timestamp, lat, lon);
+            double lon = Double.parseDouble(fields[2].trim());
+            double lat = Double.parseDouble(fields[3].trim());
+            return new TaxiData(id, timestamp, lon, lat);
         } catch (Exception e) {
             return null;
         }
@@ -328,11 +335,11 @@ public class Main {
         private final double latitude;
         private final double longitude;
 
-        public TaxiData(String taxiId, long timestamp, double latitude, double longitude) {
+        public TaxiData(String taxiId, long timestamp, double longitude, double latitude ) {
             this.taxiId = taxiId;
             this.timestamp = timestamp;
-            this.latitude = latitude;
             this.longitude = longitude;
+            this.latitude = latitude; 
         }
 
         public String getTaxiId() { return taxiId; }
@@ -474,34 +481,8 @@ public class Main {
                     value.getTaxiId(), value.getLatitude(), value.getLongitude()));
         }
     }
+    
 
-    static class PropagateToDashboard extends KeyedProcessFunction<String, TaxiData, String> {
-        private transient MapState<String, TaxiData> activeTaxis;
-
-        @Override
-        public void open(Configuration parameters) throws Exception {
-            activeTaxis = getRuntimeContext().getMapState(
-                    new MapStateDescriptor<>("activeTaxis", Types.STRING, TypeInformation.of(TaxiData.class)));
-        }
-
-        @Override
-        public void processElement(TaxiData value, Context ctx, Collector<String> out) throws Exception {
-            activeTaxis.put(value.getTaxiId(), value);
-
-            // Calculate statistics
-            int activeTaxiCount = 0;
-            double totalDistance = 0.0;
-
-            for (TaxiData taxi : activeTaxis.values()) {
-                activeTaxiCount++;
-                // In real implementation, you'd track distance per taxi
-            }
-
-            String stats = String.format("{\"activeTaxis\":%d,\"totalDistance\":%.2f}", 
-                    activeTaxiCount, totalDistance);
-            out.collect(stats);
-        }
-    }
 
     static class PropagateLocationToDashboard extends KeyedProcessFunction<String, TaxiData, String> {
         private transient ValueState<Long> lastEmitTime;
@@ -528,62 +509,224 @@ public class Main {
     }
 
     static class NotifyDashboardOperators extends KeyedProcessFunction<String, TaxiData, String> {
-        private transient ValueState<TaxiData> lastLocation;
-        private transient ValueState<Boolean> hasLeftArea10km;
+    private transient ValueState<TaxiData> lastLocationState;
+    private transient ValueState<Boolean> hasNotifiedSpeedState;
+    private transient ValueState<Boolean> hasNotifiedAreaState;
+    private transient ValueState<Long> lastSpeedNotificationTime;
+    private transient ValueState<Long> lastAreaNotificationTime;
+    
+    // Notification cooldown period (5 seconds)
+    private static final long NOTIFICATION_COOLDOWN_MS = 5000;
+
+    @Override
+    public void open(Configuration parameters) throws Exception {
+        lastLocationState = getRuntimeContext().getState(
+                new ValueStateDescriptor<>("lastLocation", TaxiData.class));
+        hasNotifiedSpeedState = getRuntimeContext().getState(
+                new ValueStateDescriptor<>("hasNotifiedSpeed", Boolean.class));
+        hasNotifiedAreaState = getRuntimeContext().getState(
+                new ValueStateDescriptor<>("hasNotifiedArea", Boolean.class));
+        lastSpeedNotificationTime = getRuntimeContext().getState(
+                new ValueStateDescriptor<>("lastSpeedNotificationTime", Long.class));
+        lastAreaNotificationTime = getRuntimeContext().getState(
+                new ValueStateDescriptor<>("lastAreaNotificationTime", Long.class));
+    }
+
+    @Override
+    public void processElement(TaxiData current, Context ctx, Collector<String> out) throws Exception {
+        TaxiData prev = lastLocationState.value();
+        
+        // Calculate distance from Forbidden City
+        double distFromFC = haversine(current.getLatitude(), current.getLongitude(),
+                FORBIDDEN_CITY_LAT, FORBIDDEN_CITY_LON);
+
+        // Check if taxi is outside 15km area - if so, clear all state and stop processing
+        if (distFromFC > AREA_RADIUS_15KM) {
+            // Clear all state for this taxi
+            lastLocationState.clear();
+            hasNotifiedSpeedState.clear();
+            hasNotifiedAreaState.clear();
+            lastSpeedNotificationTime.clear();
+            lastAreaNotificationTime.clear();
+            
+            // Send removal notification to dashboard
+            String removalNotification = String.format(
+                    "{\"type\":\"TAXI_REMOVED\",\"taxiId\":\"%s\",\"message\":\"Taxi left monitoring area\",\"distance\":%.2f,\"timestamp\":%d}",
+                    current.getTaxiId(), distFromFC, current.getTimestamp());
+            out.collect(removalNotification);
+            return; // Don't process further
+        }
+
+        // Check if leaving 10km area
+        Boolean hasNotifiedArea = hasNotifiedAreaState.value();
+        Long lastAreaNotifyTime = lastAreaNotificationTime.value();
+        
+        if (distFromFC > AREA_RADIUS_10KM && (hasNotifiedArea == null || !hasNotifiedArea)) {
+            // Only notify if we haven't notified before or if cooldown period has passed
+            if (lastAreaNotifyTime == null || 
+                (current.getTimestamp() - lastAreaNotifyTime) > NOTIFICATION_COOLDOWN_MS) {
+                
+                String notification = String.format(
+                        "{\"type\":\"AREA_VIOLATION\",\"taxiId\":\"%s\",\"message\":\"Taxi leaving 10km area\",\"distance\":%.2f,\"lat\":%.6f,\"lon\":%.6f,\"timestamp\":%d}",
+                        current.getTaxiId(), distFromFC, current.getLatitude(), current.getLongitude(), current.getTimestamp());
+                out.collect(notification);
+                
+                hasNotifiedAreaState.update(true);
+                lastAreaNotificationTime.update(current.getTimestamp());
+                
+                System.out.println("AREA ALERT: Taxi " + current.getTaxiId() + " leaving 10km area. Distance: " + distFromFC);
+            }
+        } else if (distFromFC <= AREA_RADIUS_10KM) {
+            // Reset area notification flag when taxi comes back within 10km
+            hasNotifiedAreaState.update(false);
+        }
+
+        // Check speed if we have previous location
+        if (prev != null) {
+            double distance = haversine(prev.getLatitude(), prev.getLongitude(),
+                    current.getLatitude(), current.getLongitude());
+            
+            // Convert milliseconds to seconds for more accurate calculation
+            double timeDiffSeconds = (current.getTimestamp() - prev.getTimestamp()) / 1000.0;
+
+            if (timeDiffSeconds > 0 && timeDiffSeconds < 3600) { // Reasonable time diff (less than 1 hour)
+                // Calculate speed in km/h
+                double speedKmh = (distance / timeDiffSeconds) * 3600;
+                
+                Boolean hasNotifiedSpeed = hasNotifiedSpeedState.value();
+                Long lastSpeedNotifyTime = lastSpeedNotificationTime.value();
+
+                if (speedKmh > SPEED_LIMIT_KMH) {
+                    // Only notify if we haven't notified recently (cooldown period)
+                    if (lastSpeedNotifyTime == null || 
+                        (current.getTimestamp() - lastSpeedNotifyTime) > NOTIFICATION_COOLDOWN_MS) {
+                        
+                        String notification = String.format(
+                                "{\"type\":\"SPEED_VIOLATION\",\"taxiId\":\"%s\",\"speed\":%.2f,\"limit\":%.2f,\"lat\":%.6f,\"lon\":%.6f,\"timestamp\":%d}",
+                                current.getTaxiId(), speedKmh, SPEED_LIMIT_KMH, 
+                                current.getLatitude(), current.getLongitude(), current.getTimestamp());
+                        out.collect(notification);
+                        
+                        hasNotifiedSpeedState.update(true);
+                        lastSpeedNotificationTime.update(current.getTimestamp());
+                        
+                        System.out.println("SPEED ALERT: Taxi " + current.getTaxiId() + " speeding at " + speedKmh + " km/h");
+                    }
+                } else {
+                    // Reset speed notification flag when taxi slows down
+                    hasNotifiedSpeedState.update(false);
+                }
+            }
+        }
+
+        // Update last location
+        lastLocationState.update(current);
+    }
+}
+
+    // Updated PropagateToDashboard to filter out taxis outside 15km area
+    static class PropagateToDashboard extends KeyedProcessFunction<String, TaxiData, String> {
+        private transient MapState<String, TaxiData> activeTaxisState;
+        private transient MapState<String, TaxiData> lastLocationState;
+        private transient ValueState<Double> cumulativeTotalDistanceState;
+        private static final long TAXI_TIMEOUT_MS = 300000; // 5 minutes
 
         @Override
         public void open(Configuration parameters) throws Exception {
-            lastLocation = getRuntimeContext().getState(
-                    new ValueStateDescriptor<>("lastLocation", TaxiData.class));
-            hasLeftArea10km = getRuntimeContext().getState(
-                    new ValueStateDescriptor<>("hasLeftArea10km", Boolean.class));
+            activeTaxisState = getRuntimeContext().getMapState(
+                    new MapStateDescriptor<>("activeTaxis", Types.STRING, TypeInformation.of(TaxiData.class)));
+            
+            lastLocationState = getRuntimeContext().getMapState(
+                    new MapStateDescriptor<>("lastLocation", Types.STRING, TypeInformation.of(TaxiData.class)));
+            
+            cumulativeTotalDistanceState = getRuntimeContext().getState(
+                    new ValueStateDescriptor<>("cumulativeTotalDistance", Double.class));
         }
 
         @Override
-        public void processElement(TaxiData current, Context ctx, Collector<String> out) throws Exception {
-            TaxiData prev = lastLocation.value();
-            Boolean leftArea = hasLeftArea10km.value();
-            if (leftArea == null) leftArea = false;
-
-            // Calculate distance from Forbidden City
-            double distFromFC = haversine(current.getLatitude(), current.getLongitude(),
+        public void processElement(TaxiData value, Context ctx, Collector<String> out) throws Exception {
+            long currentTime = value.getTimestamp();
+            String taxiId = value.getTaxiId();
+            
+            // Check if taxi is within 15km of Forbidden City
+            double distFromFC = haversine(value.getLatitude(), value.getLongitude(),
                     FORBIDDEN_CITY_LAT, FORBIDDEN_CITY_LON);
-
-            // Check if leaving 15km area (remove from tracking)
+            
+            // If taxi is outside 15km area, remove it from tracking and don't process
             if (distFromFC > AREA_RADIUS_15KM) {
-                lastLocation.clear();
-                hasLeftArea10km.clear();
-                return; // Don't process further
+                activeTaxisState.remove(taxiId);
+                // Don't remove from lastLocationState as we still need it for distance calculation
+                // when the taxi returns
+                
+                // Continue with statistics calculation without this taxi
+            } else {
+                // Taxi is within area, process normally
+                TaxiData previousLocation = lastLocationState.get(taxiId);
+                double cumulativeTotal = cumulativeTotalDistanceState.value() != null ? 
+                    cumulativeTotalDistanceState.value() : 0.0;
+                
+                // Calculate additional distance if we have a previous location
+                if (previousLocation != null) {
+                    double additionalDistance = haversine(
+                        previousLocation.getLatitude(), previousLocation.getLongitude(),
+                        value.getLatitude(), value.getLongitude()
+                    );
+                    cumulativeTotal += additionalDistance;
+                    cumulativeTotalDistanceState.update(cumulativeTotal);
+                }
+                
+                // Update states for active taxi
+                activeTaxisState.put(taxiId, value);
+                lastLocationState.put(taxiId, value);
             }
-
-            // Check if leaving 10km area (notify once)
-            if (distFromFC > AREA_RADIUS_10KM && !leftArea) {
-                String notification = String.format(
-                        "{\"type\":\"AREA_VIOLATION\",\"taxiId\":\"%s\",\"message\":\"Taxi leaving 10km area\",\"distance\":%.2f}",
-                        current.getTaxiId(), distFromFC);
-                out.collect(notification);
-                hasLeftArea10km.update(true);
-            }
-
-            // Check speed if we have previous location
-            if (prev != null) {
-                double distance = haversine(prev.getLatitude(), prev.getLongitude(),
-                        current.getLatitude(), current.getLongitude());
-                double timeDiffHours = (current.getTimestamp() - prev.getTimestamp()) / 3600000.0;
-
-                if (timeDiffHours > 0) {
-                    double speedKmh = distance / timeDiffHours;
-
-                    if (speedKmh > SPEED_LIMIT_KMH) {
-                        String notification = String.format(
-                                "{\"type\":\"SPEED_VIOLATION\",\"taxiId\":\"%s\",\"speed\":%.2f,\"limit\":%.2f}",
-                                current.getTaxiId(), speedKmh, SPEED_LIMIT_KMH);
-                        out.collect(notification);
-                    }
+            
+            // Clean up inactive taxis (haven't sent data in 5 minutes)
+            Set<String> taxisToRemove = new HashSet<>();
+            for (Map.Entry<String, TaxiData> entry : activeTaxisState.entries()) {
+                if (currentTime - entry.getValue().getTimestamp() > TAXI_TIMEOUT_MS) {
+                    taxisToRemove.add(entry.getKey());
                 }
             }
+            
+            // Remove inactive taxis from activeTaxisState
+            for (String inactiveTaxiId : taxisToRemove) {
+                activeTaxisState.remove(inactiveTaxiId);
+            }
+            
+            // Calculate statistics for active taxis only (within 15km area)
+            int activeTaxiCount = 0;
+            for (Map.Entry<String, TaxiData> entry : activeTaxisState.entries()) {
+                activeTaxiCount++;
+            }
+            
+            double cumulativeTotal = cumulativeTotalDistanceState.value() != null ? 
+                cumulativeTotalDistanceState.value() : 0.0;
+            
+            // Create dashboard statistics JSON
+            String stats = String.format(
+                "{\"activeTaxis\":%d,\"totalDistance\":%.2f,\"timestamp\":%d}", 
+                activeTaxiCount, cumulativeTotal, currentTime
+            );
+            
+            out.collect(stats);
+        }
+    }
 
-            lastLocation.update(current);
+    // Add a filter operator to remove taxis outside the forbidden area from location updates
+    static class FilterTaxisByArea extends KeyedProcessFunction<String, TaxiData, TaxiData> {
+        
+        @Override
+        public void processElement(TaxiData value, Context ctx, Collector<TaxiData> out) throws Exception {
+            // Calculate distance from Forbidden City
+            double distFromFC = haversine(value.getLatitude(), value.getLongitude(),
+                    FORBIDDEN_CITY_LAT, FORBIDDEN_CITY_LON);
+            System.out.println("Processing taxi outside zone " + value.getTaxiId() + " at distance " + distFromFC + "lat: " + value.getLatitude() + "lon: " + value.getLongitude() );
+            // Only emit taxis that are within 15km of the Forbidden City
+            if (distFromFC <= AREA_RADIUS_15KM) {
+                System.out.println("Processing taxi " + value.getTaxiId() + " at distance " + distFromFC);
+                out.collect(value);
+            }
+            // Taxis outside 15km area are simply not emitted (filtered out)
         }
     }
 }
