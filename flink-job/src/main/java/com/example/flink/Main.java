@@ -11,9 +11,7 @@ import org.apache.flink.api.common.state.ValueState;
 import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.api.common.typeinfo.TypeHint;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
-import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.api.java.tuple.Tuple2;
-import org.apache.flink.api.java.tuple.Tuple4;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
@@ -26,13 +24,14 @@ import org.apache.flink.streaming.connectors.redis.common.config.FlinkJedisPoolC
 import org.apache.flink.streaming.connectors.redis.common.mapper.RedisCommand;
 import org.apache.flink.streaming.connectors.redis.common.mapper.RedisCommandDescription;
 import org.apache.flink.streaming.connectors.redis.common.mapper.RedisMapper;
-
-import redis.clients.jedis.Jedis;
-import redis.clients.jedis.JedisPool;
-import redis.clients.jedis.JedisPoolConfig;
-import org.apache.flink.streaming.api.functions.sink.RichSinkFunction;
-
 import org.apache.flink.util.Collector;
+
+import com.example.flink.Main.TaxiData;
+import com.example.flink.Main.TaxiSpeed;
+import java.util.HashSet;
+import java.util.Set;
+import redis.clients.jedis.Jedis;
+import org.apache.flink.streaming.api.functions.sink.SinkFunction;
 
 import java.io.IOException;
 import java.text.ParseException;
@@ -41,8 +40,6 @@ import java.util.Date;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Properties;
-import java.util.Set;
-import java.util.HashSet;
 
 /**
  * Main Flink pipeline for processing taxi data.
@@ -50,36 +47,55 @@ import java.util.HashSet;
  */
 public class Main {
     private static final SimpleDateFormat DATE_FORMAT = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
-    
-    // Constants for monitoring
-    private static final double SPEED_LIMIT_KMH = 50.0;
-    private static final double FORBIDDEN_CITY_LAT = 39.916668;
-    private static final double FORBIDDEN_CITY_LON = 116.383331;
-    private static final double AREA_RADIUS_10KM = 10.0; // km
-    private static final double AREA_RADIUS_15KM = 15.0; // km
+    private static final SimpleDateFormat ALERT_DATE_FORMAT = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+    private static final double FORBIDDEN_CITY_LAT = 39.916;
+    private static final double FORBIDDEN_CITY_LON = 116.397;
+    private static final double WARNING_RADIUS_KM = 10.0;
+    private static final double DROP_RADIUS_KM = 15.0;
+    private static final double SPEED_LIMIT_KPH = 50.0;
 
     public static void main(String[] args) throws Exception {
         String kafkaBootstrap = null;
         String inputTopic = null;
         String redisHost = null;
 
-        // Parse command-line arguments
+        // Parse command line arguments
         for (int i = 0; i < args.length; i++) {
             switch (args[i]) {
                 case "--kafka.bootstrap.servers":
-                    kafkaBootstrap = args[++i];
+                    if (i + 1 < args.length) {
+                        kafkaBootstrap = args[++i];
+                    } else {
+                        System.err.println("Missing value for --kafka.bootstrap.servers");
+                        System.exit(1);
+                    }
                     break;
                 case "--kafka.topic":
-                    inputTopic = args[++i];
+                    if (i + 1 < args.length) {
+                        inputTopic = args[++i];
+                    } else {
+                        System.err.println("Missing value for --kafka.topic");
+                        System.exit(1);
+                    }
                     break;
                 case "--redis.host":
-                    redisHost = args[++i];
+                    if (i + 1 < args.length) {
+                        redisHost = args[++i];
+                    } else {
+                        System.err.println("Missing value for --redis.host");
+                        System.exit(1);
+                    }
+                    break;
+                default:
                     break;
             }
         }
 
         if (kafkaBootstrap == null || inputTopic == null || redisHost == null) {
-            System.err.println("Usage: --kafka.bootstrap.servers <host:port> --kafka.topic <topic> --redis.host <host>");
+            System.err.println("Usage: Main "
+                    + "--kafka.bootstrap.servers <host:port> "
+                    + "--kafka.topic <topicName> "
+                    + "--redis.host <host>");
             System.exit(1);
         }
 
@@ -87,289 +103,571 @@ public class Main {
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
 
         // Configure Kafka consumer
-        Properties kafkaProps = new Properties();
-        kafkaProps.setProperty("bootstrap.servers", kafkaBootstrap);
-        kafkaProps.setProperty("group.id", "taxi-consumer");
+        Properties consumerProps = new Properties();
+        consumerProps.setProperty("bootstrap.servers", kafkaBootstrap);
+        consumerProps.setProperty("group.id", "taxi-data-consumer");
 
         FlinkKafkaConsumer<String> kafkaConsumer = new FlinkKafkaConsumer<>(
-                inputTopic, new SimpleStringSchema(), kafkaProps);
+                inputTopic,
+                new SimpleStringSchema(),
+                consumerProps);
         kafkaConsumer.setStartFromEarliest();
 
-        // Read from Kafka topic
+        // Create the data stream from Kafka
         DataStream<String> rawStream = env.addSource(kafkaConsumer);
 
-        // Parse raw data into TaxiData objects
+        // Parse the raw data into TaxiData objects
         DataStream<TaxiData> taxiData = rawStream
                 .map(line -> {
-                    String[] parts = line.split(",");
-                    if (parts.length == 4) {
-                        return parseTaxiData(parts);
+                    if ("END".equals(line.trim())) {
+                        return null;
+                    }
+                    String[] f = line.split(",");
+                    if (f.length == 4) {
+                        return parseTaxiData(line);
                     } else {
                         System.err.println("Invalid line: " + line);
                         return null;
                     }
                 })
-                .filter(data -> data != null)
-                .name("Parse Taxi Data");
+                .filter(x -> x != null);
 
-            DataStream<TaxiData> filteredTaxiData = taxiData
-            .keyBy(TaxiData::getTaxiId)
-            .process(new FilterTaxisByArea())
-            .name("Filter Taxis by Area");
-
-            // Cleanup handling stream
-            DataStream<String> notifications = filteredTaxiData
-            .keyBy(TaxiData::getTaxiId)
-            .process(new NotifyDashboardOperators())
-            .name("Notify Dashboard with Cleanup");
-
-    // Create cleanup commands from notification stream
-    DataStream<RedisCleanupCommand> cleanupCommands = notifications
-            .filter(notification -> notification.contains("TAXI_CLEANUP") || notification.contains("CLEANUP_TAXI"))
-            .map(notification -> {
-                // Extract taxi ID from notification
-                String taxiId = extractTaxiIdFromNotification(notification);
-                return new RedisCleanupCommand(taxiId, "cleanup");
-            })
-            .name("Generate Cleanup Commands");
-
-        // Store information operator
-        DataStream<String> storeInfo = filteredTaxiData
-                .keyBy(TaxiData::getTaxiId)
-                .process(new StoreInformationOperator())
-                .name("Store Information");
-
-        // Propagate to dashboard operator
-        DataStream<String> propagateDashboard = filteredTaxiData
-                .keyBy(td -> "global_key")
-                .process(new PropagateToDashboard())
-                .name("Propagate Information to Dashboard");
-
-        // Calculate speed per taxi
-        DataStream<TaxiSpeed> enriched = filteredTaxiData
-                .keyBy(TaxiData::getTaxiId)
-                .process(new CalculateSpeed())
-                .name("Calculate Speed");
-
-        // Calculate distance per taxi
-        DataStream<TaxiDistance> dists = filteredTaxiData
-                .keyBy(TaxiData::getTaxiId)
-                .process(new CalculateDistance())
-                .name("Calculate Distance");
-
-        // Calculate average speed per taxi
-        DataStream<TaxiAverageSpeed> avgSpeeds = enriched
-                .keyBy(TaxiSpeed::getTaxiId)
-                .process(new CalculateAverageSpeed())
-                .name("Calculate Average Speed");
-
-        // Propagate location to dashboard (every 5 seconds)
-        DataStream<String> locationDashboard = filteredTaxiData
-                .keyBy(TaxiData::getTaxiId)
-                .process(new PropagateLocationToDashboard())
-                .name("Propagate Location Information to Dashboard");
-
-        // Notify dashboard operators (speeding and area violations)
-        // DataStream<String> notifications = filteredTaxiData
-        //         .keyBy(TaxiData::getTaxiId)
-        //         .process(new NotifyDashboardOperators())
-        //         .name("Notify Dashboard Once");
-        
         // Configure Redis connection
         FlinkJedisPoolConfig redisCfg = new FlinkJedisPoolConfig.Builder()
                 .setHost(redisHost)
                 .setPort(6379)
                 .build();
 
-        // Sink for taxi location data
-        filteredTaxiData.addSink(new RedisSink<>(redisCfg, new RedisMapper<TaxiData>() {
-            @Override
-            public RedisCommandDescription getCommandDescription() {
-                return new RedisCommandDescription(RedisCommand.HSET, "taxi_location");
-            }
+        // Calculate speed between consecutive points
+        DataStream<TaxiSpeed> speedData = taxiData
+                .keyBy(TaxiData::getTaxiId)
+                .process(new CalculateSpeed());
 
-            @Override
-            public String getKeyFromData(TaxiData data) {
-                return "taxi_" + data.getTaxiId();
-            }
+        // Calculate total distance traveled
+        DataStream<TaxiDistance> distanceData = taxiData
+                .keyBy(TaxiData::getTaxiId)
+                .process(new CalculateDistance());
 
-            @Override
-            public String getValueFromData(TaxiData data) {
-                return String.format("{\"timestamp\":%d,\"lat\":%.6f,\"lon\":%.6f}",
-                        data.getTimestamp(), data.getLatitude(), data.getLongitude());
-            }
-    }));
+        // Calculate average speed
+        DataStream<TaxiAverageSpeed> avgSpeedData = taxiData
+                .keyBy(TaxiData::getTaxiId)
+                .process(new CalculateAverageSpeed());
 
-        // Sink for speed data
-   enriched.addSink(new SpeedMonitoringSink(redisHost, 6379, SPEED_LIMIT_KMH))
-    .name("Monitor Speed and Violations");
+        // Detect speeding violations
+        DataStream<String> speedingAlerts = speedData
+                .filter(speed -> speed.getSpeed() > SPEED_LIMIT_KPH)
+                .map(speed -> {
+                    String timeStr = ALERT_DATE_FORMAT.format(new Date(speed.getTimestamp()));
+                    return String.format(
+                            "SPEEDING: Taxi %s at %.1f km/h (limit: %.1f) at %s",
+                            speed.getTaxiId(),
+                            speed.getSpeed(),
+                            SPEED_LIMIT_KPH,
+                            timeStr);
+                });
 
-      cleanupCommands.addSink(new TaxiCleanupSink(redisHost, 6379))
-    .name("Cleanup All Taxi Data");
+        // Detect geofence violations
+        DataStream<String> geofenceAlerts = taxiData
+                .keyBy(TaxiData::getTaxiId)
+                .process(new GeofenceMonitor())
+                .filter(alert -> alert != null);
+        DataStream<Tuple2<String, Boolean>> geofenceViolations = taxiData
+                .keyBy(TaxiData::getTaxiId)
+                .process(new ViolationDetector());
 
-        // Sink for average speed data
-        avgSpeeds.addSink(new RedisSink<>(redisCfg, new RedisMapper<TaxiAverageSpeed>() {
-            @Override
-            public RedisCommandDescription getCommandDescription() {
-                return new RedisCommandDescription(RedisCommand.HSET, "average_speed");
-            }
+        // Track current violators
+        geofenceViolations
+                .keyBy(data -> data.f0)
+                .process(new ViolationTracker(redisHost));
+        // Combine all alerts
+        DataStream<String> allAlerts = speedingAlerts.union(geofenceAlerts);
+        // Calculate total speeding taxis (count)
+        DataStream<Tuple2<String, Integer>> totalSpeedingTaxis = speedData
+                .filter(speed -> speed.getSpeed() > SPEED_LIMIT_KPH)
+                .map(speed -> Tuple2.of("total_speeding", 1))
+                .returns(new TypeHint<Tuple2<String, Integer>>() {
+                })
+                .keyBy(t -> t.f0)
+                .sum(1);
 
-            @Override
-            public String getKeyFromData(TaxiAverageSpeed data) {
-                return "taxi_" + data.getTaxiId();
-            }
+        // Calculate total area violations (count)
+        DataStream<Tuple2<String, Integer>> totalAreaViolations = geofenceAlerts
+                .map(alert -> Tuple2.of("total_violations", 1))
+                .returns(new TypeHint<Tuple2<String, Integer>>() {
+                })
+                .keyBy(t -> t.f0)
+                .sum(1);
+        // Calculate total distance of all taxis
+        DataStream<Tuple2<String, Double>> totalDistanceAllTaxis = distanceData
+                .keyBy(td -> "global_key") // Force same key for all
+                .process(new TotalDistanceCalculator());
 
-            @Override
-            public String getValueFromData(TaxiAverageSpeed data) {
-                return String.format("%.2f", data.getAverageSpeed());
-            }
-        }));
+        // Count currently driving taxis
+        DataStream<Tuple2<String, Integer>> currentlyDrivingTaxis = taxiData
+                .keyBy(td -> "global_key")
+                .process(new ActiveTaxisCounter());
+        DataStream<Tuple2<String, String>> speedingIncidents = speedData
+                .map(speed -> Tuple2.of(speed.getTaxiId(), String.format("%.1f km/h", speed.getSpeed())))
+                .returns(new TypeHint<Tuple2<String, String>>() {
+                });
 
-        // Sink for distance data
-        dists.addSink(new RedisSink<>(redisCfg, new RedisMapper<TaxiDistance>() {
-            @Override
-            public RedisCommandDescription getCommandDescription() {
-                return new RedisCommandDescription(RedisCommand.HSET, "taxi_distance");
-            }
+        // Store data in Redis
+        taxiData.addSink(new RedisSink<>(redisCfg, new RedisTaxiLocationMapper()));
+        speedData.addSink(new RedisSink<>(redisCfg, new RedisSpeedMapper()));
+        avgSpeedData.addSink(new RedisSink<>(redisCfg, new RedisAverageSpeedMapper()));
+        distanceData.addSink(new RedisSink<>(redisCfg, new RedisDistanceMapper()));
+        allAlerts.addSink(new RedisSink<>(redisCfg, new RedisAlertMapper()));
+        totalSpeedingTaxis.addSink(new RedisSink<>(redisCfg, new RedisTotalSpeedingMapper()));
+        totalAreaViolations.addSink(new RedisSink<>(redisCfg, new RedisTotalAreaViolationsMapper()));
 
-            @Override
-            public String getKeyFromData(TaxiDistance data) {
-                return "taxi_" + data.getTaxiId();
-            }
+        totalDistanceAllTaxis.addSink(new RedisSink<>(redisCfg, new RedisTotalDistanceMapper()));
+        currentlyDrivingTaxis.addSink(new RedisSink<>(redisCfg, new RedisActiveTaxisMapper()));
+        // speedingIncidents.addSink(new RedisSink<>(redisCfg, new
+        // RedisSpeedingIncidentsMapper()));
+        speedingIncidents
+                .keyBy(data -> data.f0) // key by taxiId
+                .process(new SpeedingIncidentTracker(redisHost));
 
-            @Override
-            public String getValueFromData(TaxiDistance data) {
-                return String.format("%.2f", data.getDistance());
-            }
-        }));
-
-        // Sink for dashboard data
-        propagateDashboard.addSink(new RedisSink<>(redisCfg, new RedisMapper<String>() {
-            @Override
-            public RedisCommandDescription getCommandDescription() {
-                return new RedisCommandDescription(RedisCommand.SET);
-            }
-
-            @Override
-            public String getKeyFromData(String data) {
-                return "dashboard_stats";
-            }
-
-            @Override
-            public String getValueFromData(String data) {
-                return data;
-            }
-        }));
-
-        // Sink for location updates
-        locationDashboard.addSink(new RedisSink<>(redisCfg, new RedisMapper<String>() {
-            @Override
-            public RedisCommandDescription getCommandDescription() {
-                return new RedisCommandDescription(RedisCommand.LPUSH, "location_updates");
-            }
-
-            @Override
-            public String getKeyFromData(String data) {
-                return "location_updates";
-            }
-
-            @Override
-            public String getValueFromData(String data) {
-                return data;
-            }
-        }));
-
-        // Sink for notifications
-        notifications.addSink(new RedisSink<>(redisCfg, new RedisMapper<String>() {
-            @Override
-            public RedisCommandDescription getCommandDescription() {
-                return new RedisCommandDescription(RedisCommand.LPUSH, "notifications");
-            }
-
-            @Override
-            public String getKeyFromData(String data) {
-                return "notifications";
-            }
-
-            @Override
-            public String getValueFromData(String data) {
-                return data;
-            }
-        }));
-
-        env.execute("Taxi Stream Processing");
+        // Execute the Flink job
+        env.execute("Taxi Fleet Monitoring Pipeline");
     }
 
-    // Parse TaxiData
-    private static TaxiData parseTaxiData(String[] fields) {
-        try {
-            String id = fields[0].trim();
-            long timestamp = parseTimestamp(fields[1].trim());
-            double lon = Double.parseDouble(fields[2].trim());
-            double lat = Double.parseDouble(fields[3].trim());
-            return new TaxiData(id, timestamp, lon, lat);
-        } catch (Exception e) {
-            return null;
+    private static TaxiData parseTaxiData(String line) {
+        String[] f = line.split(",");
+        if (f.length == 4) {
+            String id = f[0].trim();
+            long ts = parseTimestamp(f[1].trim());
+            double lat = Double.parseDouble(f[3].trim());
+            double lng = Double.parseDouble(f[2].trim());
+            return new TaxiData(id, ts, lat, lng);
+        } else {
+            throw new IllegalArgumentException("Invalid line: " + line);
         }
     }
 
-    private static long parseTimestamp(String input) {
-        if (input.matches("\\d+")) {
-            return Long.parseLong(input);
+    private static long parseTimestamp(String s) {
+        if (s.matches("\\d+")) {
+            return Long.parseLong(s);
         }
         try {
-            return DATE_FORMAT.parse(input).getTime();
+            Date d = DATE_FORMAT.parse(s);
+            return d.getTime();
         } catch (ParseException e) {
-            return -1;
+            throw new IllegalArgumentException("Bad timestamp: " + s, e);
         }
     }
 
-    // Calculate haversine distance between two points
-    private static double haversine(double lat1, double lon1, double lat2, double lon2) {
-        final int R = 6371; // Earth radius in km
-        double dLat = Math.toRadians(lat2 - lat1);
-        double dLon = Math.toRadians(lon2 - lon1);
+    // Calculates TOTAL DISTANCE of all taxis (stateful)
+    public static class SpeedingIncidentTracker extends KeyedProcessFunction<String, Tuple2<String, String>, Void> {
+        private final String redisHost;
+        private transient ValueState<Boolean> wasSpeeding;
 
-        double a = Math.sin(dLat / 2) * Math.sin(dLat / 2)
-                + Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2))
-                        * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+        public SpeedingIncidentTracker(String redisHost) {
+            this.redisHost = redisHost;
+        }
 
-        double c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-        return R * c; // Distance in km
+        @Override
+        public void open(Configuration parameters) {
+            ValueStateDescriptor<Boolean> desc = new ValueStateDescriptor<>("wasSpeeding", Boolean.class);
+            wasSpeeding = getRuntimeContext().getState(desc);
+        }
+
+        @Override
+        public void processElement(Tuple2<String, String> data, Context ctx, Collector<Void> out) throws Exception {
+            double speed = Double.parseDouble(data.f1.replace(" km/h", ""));
+            boolean isSpeedingNow = speed > SPEED_LIMIT_KPH;
+            Boolean prevState = wasSpeeding.value();
+
+            try (Jedis jedis = new Jedis(redisHost)) {
+                if (Boolean.TRUE.equals(prevState) && !isSpeedingNow) {
+                    // Taxi has stopped speeding -> remove from Redis
+                    jedis.hdel("speeding_incidents", data.f0);
+                } else if (!Boolean.TRUE.equals(prevState) && isSpeedingNow) {
+                    // Taxi started speeding -> add to Redis
+                    jedis.hset("speeding_incidents", data.f0, data.f1);
+                }
+            }
+
+            wasSpeeding.update(isSpeedingNow);
+        }
+    }
+
+    public static class ViolationDetector extends KeyedProcessFunction<String, TaxiData, Tuple2<String, Boolean>> {
+        private static final double FORBIDDEN_CITY_LAT = 39.916;
+        private static final double FORBIDDEN_CITY_LON = 116.397;
+        private static final double WARNING_RADIUS_KM = 10.0;
+        private static final double DROP_RADIUS_KM = 15.0;
+
+        @Override
+        public void processElement(TaxiData taxi, Context ctx, Collector<Tuple2<String, Boolean>> out)
+                throws Exception {
+            double distance = haversine(
+                    FORBIDDEN_CITY_LAT, FORBIDDEN_CITY_LON,
+                    taxi.getLatitude(), taxi.getLongitude());
+
+            boolean isViolating = (distance > WARNING_RADIUS_KM && distance <= DROP_RADIUS_KM);
+            out.collect(Tuple2.of(taxi.getTaxiId(), isViolating));
+        }
+
+        private double haversine(double lat1, double lon1, double lat2, double lon2) {
+            final int R = 6371;
+            double dLat = Math.toRadians(lat2 - lat1);
+            double dLon = Math.toRadians(lon2 - lon1);
+            double a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                    Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2)) *
+                            Math.sin(dLon / 2) * Math.sin(dLon / 2);
+            double c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+            return R * c;
+        }
+    }
+
+    public static class ViolationTracker extends KeyedProcessFunction<String, Tuple2<String, Boolean>, Void> {
+        private final String redisHost;
+        private transient ValueState<Boolean> wasViolating;
+
+        public ViolationTracker(String redisHost) {
+            this.redisHost = redisHost;
+        }
+
+        @Override
+        public void open(Configuration parameters) {
+            ValueStateDescriptor<Boolean> desc = new ValueStateDescriptor<>("wasViolating", Boolean.class);
+            wasViolating = getRuntimeContext().getState(desc);
+        }
+
+        @Override
+        public void processElement(Tuple2<String, Boolean> data, Context ctx, Collector<Void> out) throws Exception {
+            boolean isViolatingNow = data.f1;
+            Boolean prevState = wasViolating.value();
+
+            try (Jedis jedis = new Jedis(redisHost)) {
+                if (Boolean.TRUE.equals(prevState) && !isViolatingNow) {
+                    // Taxi has stopped violating -> remove from Redis
+                    jedis.hdel("current_violations", data.f0);
+                } else if (!Boolean.TRUE.equals(prevState) && isViolatingNow) {
+                    // Taxi started violating -> add to Redis
+                    String value = String.format("%d", System.currentTimeMillis());
+                    jedis.hset("current_violations", data.f0, value);
+                }
+            }
+
+            wasViolating.update(isViolatingNow);
+        }
+    }
+
+    public static class TotalDistanceCalculator
+            extends KeyedProcessFunction<String, TaxiDistance, Tuple2<String, Double>> {
+        private transient ValueState<Double> totalDistanceState;
+
+        @Override
+        public void open(Configuration parameters) {
+            totalDistanceState = getRuntimeContext().getState(
+                    new ValueStateDescriptor<>("totalDistanceState", Double.class, 0.0));
+        }
+
+        @Override
+        public void processElement(TaxiDistance taxiDistance, Context ctx, Collector<Tuple2<String, Double>> out)
+                throws Exception {
+            double currentTotal = totalDistanceState.value() + taxiDistance.getDistance();
+            totalDistanceState.update(currentTotal);
+            out.collect(Tuple2.of("total_distance_all_taxis", currentTotal));
+        }
+    }
+
+    public static class CurrentSpeedingSink implements SinkFunction<Tuple2<String, String>> {
+        private final String redisHost;
+
+        public CurrentSpeedingSink(String redisHost) {
+            this.redisHost = redisHost;
+        }
+
+        @Override
+        public void invoke(Tuple2<String, String> data, Context context) throws Exception {
+            try (Jedis jedis = new Jedis(redisHost)) {
+                double speed = Double.parseDouble(data.f1.replace(" km/h", ""));
+                if (speed > SPEED_LIMIT_KPH) {
+                    jedis.hset("speeding_incidents", data.f0, data.f1);
+                } else {
+                    jedis.hdel("speeding_incidents", data.f0);
+                }
+            }
+        }
+    }
+
+    // Counts CURRENTLY DRIVING taxis (stateful)
+    public static class ActiveTaxisCounter extends KeyedProcessFunction<String, TaxiData, Tuple2<String, Integer>> {
+        private transient ValueState<Set<String>> activeTaxisState;
+
+        @Override
+        public void open(Configuration parameters) {
+            ValueStateDescriptor<Set<String>> descriptor = new ValueStateDescriptor<>("activeTaxisState",
+                    TypeInformation.of(new TypeHint<Set<String>>() {
+                    }));
+            activeTaxisState = getRuntimeContext().getState(descriptor);
+        }
+
+        @Override
+        public void processElement(
+                TaxiData taxiData,
+                Context ctx,
+                Collector<Tuple2<String, Integer>> out) throws Exception {
+            Set<String> currentSet = activeTaxisState.value();
+            if (currentSet == null) {
+                currentSet = new HashSet<>();
+            }
+            currentSet.add(taxiData.getTaxiId());
+            activeTaxisState.update(currentSet);
+            out.collect(Tuple2.of("currently_driving_taxis", currentSet.size()));
+        }
+    }
+
+    // Redis mappers
+    public static class RedisCurrentViolationsMapper implements RedisMapper<Tuple2<String, String>> {
+        @Override
+        public RedisCommandDescription getCommandDescription() {
+            return new RedisCommandDescription(RedisCommand.HSET, "current_violations");
+        }
+
+        @Override
+        public String getKeyFromData(Tuple2<String, String> data) {
+            return data.f0;
+        }
+
+        @Override
+        public String getValueFromData(Tuple2<String, String> data) {
+            return data.f1;
+        }
+    }
+
+    public static class RedisTotalSpeedingMapper implements RedisMapper<Tuple2<String, Integer>> {
+        @Override
+        public RedisCommandDescription getCommandDescription() {
+            return new RedisCommandDescription(RedisCommand.SET, "total_speeding_taxis");
+        }
+
+        @Override
+        public String getKeyFromData(Tuple2<String, Integer> data) {
+            return "total_speeding_taxis";
+        }
+
+        @Override
+        public String getValueFromData(Tuple2<String, Integer> data) {
+            return data.f1.toString();
+        }
+    }
+
+    public static class RedisTotalAreaViolationsMapper implements RedisMapper<Tuple2<String, Integer>> {
+        @Override
+        public RedisCommandDescription getCommandDescription() {
+            return new RedisCommandDescription(RedisCommand.SET, "total_area_violations");
+        }
+
+        @Override
+        public String getKeyFromData(Tuple2<String, Integer> data) {
+            return "total_area_violations";
+        }
+
+        @Override
+        public String getValueFromData(Tuple2<String, Integer> data) {
+            return data.f1.toString();
+        }
+    }
+
+    public static class RedisTaxiLocationMapper implements RedisMapper<TaxiData> {
+        @Override
+        public RedisCommandDescription getCommandDescription() {
+            return new RedisCommandDescription(RedisCommand.HSET, "taxi_locations");
+        }
+
+        @Override
+        public String getKeyFromData(TaxiData data) {
+            return data.getTaxiId();
+        }
+
+        @Override
+        public String getValueFromData(TaxiData data) {
+            return String.format("%.6f,%.6f,%d", data.getLatitude(), data.getLongitude(), data.getTimestamp());
+        }
+    }
+
+    public static class RedisSpeedMapper implements RedisMapper<TaxiSpeed> {
+        @Override
+        public RedisCommandDescription getCommandDescription() {
+            return new RedisCommandDescription(RedisCommand.HSET, "speed");
+        }
+
+        @Override
+        public String getKeyFromData(TaxiSpeed data) {
+            return data.getTaxiId();
+        }
+
+        @Override
+        public String getValueFromData(TaxiSpeed data) {
+            return String.format("%.2f", data.getSpeed());
+        }
+    }
+
+    public static class RedisAverageSpeedMapper implements RedisMapper<TaxiAverageSpeed> {
+        @Override
+        public RedisCommandDescription getCommandDescription() {
+            return new RedisCommandDescription(RedisCommand.HSET, "average_speed");
+        }
+
+        @Override
+        public String getKeyFromData(TaxiAverageSpeed data) {
+            return data.getTaxiId();
+        }
+
+        @Override
+        public String getValueFromData(TaxiAverageSpeed data) {
+            return String.format("%.2f", data.getAverageSpeed());
+        }
+    }
+
+    public static class RedisDistanceMapper implements RedisMapper<TaxiDistance> {
+        @Override
+        public RedisCommandDescription getCommandDescription() {
+            return new RedisCommandDescription(RedisCommand.HSET, "taxi_distance");
+        }
+
+        @Override
+        public String getKeyFromData(TaxiDistance data) {
+            return data.getTaxiId();
+        }
+
+        @Override
+        public String getValueFromData(TaxiDistance data) {
+            return String.format("%.2f", data.getDistance());
+        }
+    }
+
+    public static class RedisAlertMapper implements RedisMapper<String> {
+        @Override
+        public RedisCommandDescription getCommandDescription() {
+            return new RedisCommandDescription(RedisCommand.LPUSH, "alerts");
+        }
+
+        @Override
+        public String getKeyFromData(String data) {
+            return "alerts";
+        }
+
+        @Override
+        public String getValueFromData(String data) {
+            return data;
+        }
+    }
+
+    // For storing currently speeding taxis (HSET in Redis)
+    public static class RedisSpeedingIncidentsMapper implements RedisMapper<Tuple2<String, String>> {
+        @Override
+        public RedisCommandDescription getCommandDescription() {
+            return new RedisCommandDescription(RedisCommand.HSET, "speeding_incidents");
+        }
+
+        @Override
+        public String getKeyFromData(Tuple2<String, String> data) {
+            return data.f0;
+        } // taxi ID
+
+        @Override
+        public String getValueFromData(Tuple2<String, String> data) {
+            return data.f1;
+        } // speed value
+    }
+
+    // Redis mapper for total distance
+    public static class RedisTotalDistanceMapper implements RedisMapper<Tuple2<String, Double>> {
+        @Override
+        public RedisCommandDescription getCommandDescription() {
+            return new RedisCommandDescription(RedisCommand.SET, "total_distance_all_taxis");
+        }
+
+        @Override
+        public String getKeyFromData(Tuple2<String, Double> data) {
+            return data.f0;
+        }
+
+        @Override
+        public String getValueFromData(Tuple2<String, Double> data) {
+            return String.format("%.2f", data.f1);
+        }
+    }
+
+    // Redis mapper for active taxis count
+    public static class RedisActiveTaxisMapper implements RedisMapper<Tuple2<String, Integer>> {
+        @Override
+        public RedisCommandDescription getCommandDescription() {
+            return new RedisCommandDescription(RedisCommand.SET, "currently_driving_taxis");
+        }
+
+        @Override
+        public String getKeyFromData(Tuple2<String, Integer> data) {
+            return data.f0;
+        }
+
+        @Override
+        public String getValueFromData(Tuple2<String, Integer> data) {
+            return data.f1.toString();
+        }
     }
 
     // Data classes
-    static class TaxiData {
+    public static class TaxiData {
         private final String taxiId;
         private final long timestamp;
         private final double latitude;
         private final double longitude;
 
-        public TaxiData(String taxiId, long timestamp, double longitude, double latitude ) {
+        public TaxiData(String taxiId, long timestamp, double latitude, double longitude) {
             this.taxiId = taxiId;
             this.timestamp = timestamp;
+            this.latitude = latitude;
             this.longitude = longitude;
-            this.latitude = latitude; 
         }
 
-        public String getTaxiId() { return taxiId; }
-        public long getTimestamp() { return timestamp; }
-        public double getLatitude() { return latitude; }
-        public double getLongitude() { return longitude; }
+        public String getTaxiId() {
+            return taxiId;
+        }
+
+        public long getTimestamp() {
+            return timestamp;
+        }
+
+        public double getLatitude() {
+            return latitude;
+        }
+
+        public double getLongitude() {
+            return longitude;
+        }
     }
 
-    static class TaxiSpeed extends TaxiData {
+    public static class TaxiSpeed {
+        private final String taxiId;
         private final double speed;
+        private final long timestamp;
 
-        public TaxiSpeed(String taxiId, long timestamp, double latitude, double longitude, double speed) {
-            super(taxiId, timestamp, latitude, longitude);
+        public TaxiSpeed(String taxiId, double speed, long timestamp) {
+            this.taxiId = taxiId;
             this.speed = speed;
+            this.timestamp = timestamp;
         }
 
-        public double getSpeed() { return speed; }
+        public String getTaxiId() {
+            return taxiId;
+        }
+
+        public double getSpeed() {
+            return speed;
+        }
+
+        public long getTimestamp() {
+            return timestamp;
+        }
     }
 
-    static class TaxiDistance {
+    public static class TaxiDistance {
         private final String taxiId;
         private final double distance;
 
@@ -378,11 +676,16 @@ public class Main {
             this.distance = distance;
         }
 
-        public String getTaxiId() { return taxiId; }
-        public double getDistance() { return distance; }
+        public String getTaxiId() {
+            return taxiId;
+        }
+
+        public double getDistance() {
+            return distance;
+        }
     }
 
-    static class TaxiAverageSpeed {
+    public static class TaxiAverageSpeed {
         private final String taxiId;
         private final double averageSpeed;
 
@@ -391,12 +694,17 @@ public class Main {
             this.averageSpeed = averageSpeed;
         }
 
-        public String getTaxiId() { return taxiId; }
-        public double getAverageSpeed() { return averageSpeed; }
+        public String getTaxiId() {
+            return taxiId;
+        }
+
+        public double getAverageSpeed() {
+            return averageSpeed;
+        }
     }
 
-    // Process Functions
-    static class CalculateSpeed extends KeyedProcessFunction<String, TaxiData, TaxiSpeed> {
+    // Operator implementations
+    public static class CalculateSpeed extends KeyedProcessFunction<String, TaxiData, TaxiSpeed> {
         private transient ValueState<TaxiData> lastState;
 
         @Override
@@ -409,25 +717,37 @@ public class Main {
         public void processElement(TaxiData current, Context ctx, Collector<TaxiSpeed> out) throws Exception {
             TaxiData prev = lastState.value();
             if (prev != null) {
-                double distance = haversine(prev.getLatitude(), prev.getLongitude(),
+                double distance = haversine(
+                        prev.getLatitude(), prev.getLongitude(),
                         current.getLatitude(), current.getLongitude());
                 double timeDiffSec = (current.getTimestamp() - prev.getTimestamp()) / 1000.0;
 
                 if (timeDiffSec > 0) {
                     double speed = (distance / timeDiffSec) * 3600; // km/h
-                    out.collect(new TaxiSpeed(current.getTaxiId(), current.getTimestamp(), 
-                            current.getLatitude(), current.getLongitude(), speed));
+                    out.collect(new TaxiSpeed(
+                            current.getTaxiId(),
+                            speed,
+                            current.getTimestamp() // Pass current timestamp
+                    ));
                 }
-            } else {
-                // First record, speed is 0
-                out.collect(new TaxiSpeed(current.getTaxiId(), current.getTimestamp(), 
-                        current.getLatitude(), current.getLongitude(), 0.0));
             }
             lastState.update(current);
         }
+
+        private double haversine(double lat1, double lon1, double lat2, double lon2) {
+            final int R = 6371;
+            double dLat = Math.toRadians(lat2 - lat1);
+            double dLon = Math.toRadians(lon2 - lon1);
+            double a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                    Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2)) *
+                            Math.sin(dLon / 2) * Math.sin(dLon / 2);
+            double c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+            return R * c;
+        }
+
     }
 
-    static class CalculateDistance extends KeyedProcessFunction<String, TaxiData, TaxiDistance> {
+    public static class CalculateDistance extends KeyedProcessFunction<String, TaxiData, TaxiDistance> {
         private transient ValueState<TaxiData> lastPoint;
         private transient ValueState<Double> totalDistance;
 
@@ -436,535 +756,123 @@ public class Main {
             lastPoint = getRuntimeContext().getState(
                     new ValueStateDescriptor<>("lastPoint", TaxiData.class));
             totalDistance = getRuntimeContext().getState(
-                    new ValueStateDescriptor<>("totalDistance", Double.class));
+                    new ValueStateDescriptor<>("totalDistance", Double.class, 0.0));
         }
 
         @Override
         public void processElement(TaxiData current, Context ctx, Collector<TaxiDistance> out) throws Exception {
             TaxiData prev = lastPoint.value();
-            double totalDist = totalDistance.value() != null ? totalDistance.value() : 0.0;
+            Double totalDist = totalDistance.value();
 
             if (prev != null) {
-                double dist = haversine(prev.getLatitude(), prev.getLongitude(), 
+                double dist = haversine(prev.getLatitude(), prev.getLongitude(),
                         current.getLatitude(), current.getLongitude());
                 totalDist += dist;
             }
 
             lastPoint.update(current);
             totalDistance.update(totalDist);
-
             out.collect(new TaxiDistance(current.getTaxiId(), totalDist));
         }
+
+        private double haversine(double lat1, double lon1, double lat2, double lon2) {
+            final int R = 6371;
+            double dLat = Math.toRadians(lat2 - lat1);
+            double dLon = Math.toRadians(lon2 - lon1);
+            double a = Math.sin(dLat / 2) * Math.sin(dLat / 2)
+                    + Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2))
+                            * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+            double c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+            return R * c;
+        }
     }
 
-    static class CalculateAverageSpeed extends KeyedProcessFunction<String, TaxiSpeed, TaxiAverageSpeed> {
-        private transient ValueState<Tuple2<Double, Integer>> speedSumAndCount;
+    public static class CalculateAverageSpeed extends KeyedProcessFunction<String, TaxiData, TaxiAverageSpeed> {
+        private transient ValueState<TaxiData> firstPoint;
+        private transient ValueState<TaxiData> lastPoint;
+        private transient ValueState<Double> totalDistance;
 
         @Override
         public void open(Configuration parameters) throws Exception {
-            speedSumAndCount = getRuntimeContext().getState(
-                    new ValueStateDescriptor<>("speedSumAndCount",
-                            TypeInformation.of(new TypeHint<Tuple2<Double, Integer>>() {})));
+            firstPoint = getRuntimeContext().getState(
+                    new ValueStateDescriptor<>("firstPoint", TaxiData.class));
+            lastPoint = getRuntimeContext().getState(
+                    new ValueStateDescriptor<>("lastPoint", TaxiData.class));
+            totalDistance = getRuntimeContext().getState(
+                    new ValueStateDescriptor<>("totalDistance", Double.class, 0.0));
         }
 
         @Override
-        public void processElement(TaxiSpeed current, Context ctx, Collector<TaxiAverageSpeed> out) throws Exception {
-            Tuple2<Double, Integer> sumAndCount = speedSumAndCount.value();
-            if (sumAndCount == null) {
-                sumAndCount = Tuple2.of(0.0, 0);
-            }
+        public void processElement(TaxiData current, Context ctx, Collector<TaxiAverageSpeed> out) throws Exception {
+            TaxiData first = firstPoint.value();
+            TaxiData last = lastPoint.value();
+            Double totalDist = totalDistance.value();
 
-            double newSum = sumAndCount.f0 + current.getSpeed();
-            int newCount = sumAndCount.f1 + 1;
-
-            speedSumAndCount.update(Tuple2.of(newSum, newCount));
-
-            double avgSpeed = newSum / newCount;
-            out.collect(new TaxiAverageSpeed(current.getTaxiId(), avgSpeed));
-        }
-    }
-
-    static class StoreInformationOperator extends KeyedProcessFunction<String, TaxiData, String> {
-        @Override
-        public void processElement(TaxiData value, Context ctx, Collector<String> out) {
-            out.collect(String.format("Stored: taxi_%s at %.6f,%.6f", 
-                    value.getTaxiId(), value.getLatitude(), value.getLongitude()));
-        }
-    }
-    
-
-
-    static class PropagateLocationToDashboard extends KeyedProcessFunction<String, TaxiData, String> {
-        private transient ValueState<Long> lastEmitTime;
-
-        @Override
-        public void open(Configuration parameters) throws Exception {
-            lastEmitTime = getRuntimeContext().getState(
-                    new ValueStateDescriptor<>("lastEmitTime", Long.class));
-        }
-
-        @Override
-        public void processElement(TaxiData value, Context ctx, Collector<String> out) throws Exception {
-            Long lastTime = lastEmitTime.value();
-            long currentTime = value.getTimestamp();
-
-            if (lastTime == null || currentTime - lastTime >= 5000) { // 5 seconds
-                String locationUpdate = String.format(
-                        "{\"taxiId\":\"%s\",\"lat\":%.6f,\"lon\":%.6f,\"timestamp\":%d}",
-                        value.getTaxiId(), value.getLatitude(), value.getLongitude(), currentTime);
-                out.collect(locationUpdate);
-                lastEmitTime.update(currentTime);
-            }
-        }
-    }
-private static String extractTaxiIdFromNotification(String notification) {
-    try {
-        int start = notification.indexOf("\"taxiId\":\"") + 10;
-        int end = notification.indexOf("\"", start);
-        return notification.substring(start, end);
-    } catch (Exception e) {
-        System.err.println("Error extracting taxi ID from notification: " + notification);
-        return "unknown";
-    }
-}
-static class NotifyDashboardOperators extends KeyedProcessFunction<String, TaxiData, String> {
-    private transient ValueState<TaxiData> lastLocationState;
-    private transient ValueState<Boolean> hasNotifiedSpeedState;
-    private transient ValueState<Boolean> hasNotifiedAreaState;
-    private transient ValueState<Long> lastSpeedNotificationTime;
-    private transient ValueState<Long> lastAreaNotificationTime;
-    private transient ValueState<Boolean> isActiveState;
-    
-    private static final long NOTIFICATION_COOLDOWN_MS = 5000;
-
-    @Override
-    public void open(Configuration parameters) throws Exception {
-        lastLocationState = getRuntimeContext().getState(
-                new ValueStateDescriptor<>("lastLocation", TaxiData.class));
-        hasNotifiedSpeedState = getRuntimeContext().getState(
-                new ValueStateDescriptor<>("hasNotifiedSpeed", Boolean.class));
-        hasNotifiedAreaState = getRuntimeContext().getState(
-                new ValueStateDescriptor<>("hasNotifiedArea", Boolean.class));
-        lastSpeedNotificationTime = getRuntimeContext().getState(
-                new ValueStateDescriptor<>("lastSpeedNotificationTime", Long.class));
-        lastAreaNotificationTime = getRuntimeContext().getState(
-                new ValueStateDescriptor<>("lastAreaNotificationTime", Long.class));
-        isActiveState = getRuntimeContext().getState(
-                new ValueStateDescriptor<>("isActive", Boolean.class));
-    }
-
-    @Override
-    public void processElement(TaxiData current, Context ctx, Collector<String> out) throws Exception {
-        TaxiData prev = lastLocationState.value();
-        Boolean wasActive = isActiveState.value();
-        
-        // Calculate distance from Forbidden City
-        double distFromFC = haversine(current.getLatitude(), current.getLongitude(),
-                FORBIDDEN_CITY_LAT, FORBIDDEN_CITY_LON);
-
-        // Check if taxi is outside 15km area
-        if (distFromFC > AREA_RADIUS_15KM) {
-            if (wasActive == null || wasActive) {
-                // Taxi just left the 15km area - trigger cleanup
-                String cleanupNotification = String.format(
-                    "{\"type\":\"TAXI_CLEANUP\",\"taxiId\":\"%s\",\"message\":\"Taxi left monitoring area - stats cleared\",\"distance\":%.2f,\"timestamp\":%d}",
-                    current.getTaxiId(), distFromFC, current.getTimestamp());
-                out.collect(cleanupNotification);
-                
-                // Clear all state for this taxi
-                clearAllState();
-            }
-            return; // Don't process further
-        }
-
-        // Taxi is within 15km area
-        if (wasActive == null || !wasActive) {
-            // Taxi just became active
-            String activeNotification = String.format(
-                "{\"type\":\"TAXI_ACTIVE\",\"taxiId\":\"%s\",\"message\":\"Taxi entered monitoring area\",\"distance\":%.2f,\"lat\":%.6f,\"lon\":%.6f,\"timestamp\":%d}",
-                current.getTaxiId(), distFromFC, current.getLatitude(), current.getLongitude(), current.getTimestamp());
-            out.collect(activeNotification);
-        }
-        
-        isActiveState.update(true);
-
-        // Check if leaving 10km area
-        Boolean hasNotifiedArea = hasNotifiedAreaState.value();
-        Long lastAreaNotifyTime = lastAreaNotificationTime.value();
-        
-        if (distFromFC > AREA_RADIUS_10KM && (hasNotifiedArea == null || !hasNotifiedArea)) {
-            // Only notify if we haven't notified before or if cooldown period has passed
-            if (lastAreaNotifyTime == null || 
-                (current.getTimestamp() - lastAreaNotifyTime) > NOTIFICATION_COOLDOWN_MS) {
-                
-                String notification = String.format(
-                        "{\"type\":\"AREA_VIOLATION\",\"taxiId\":\"%s\",\"message\":\"Taxi leaving 10km area\",\"distance\":%.2f,\"lat\":%.6f,\"lon\":%.6f,\"timestamp\":%d}",
-                        current.getTaxiId(), distFromFC, current.getLatitude(), current.getLongitude(), current.getTimestamp());
-                out.collect(notification);
-                
-                hasNotifiedAreaState.update(true);
-                lastAreaNotificationTime.update(current.getTimestamp());
-                
-                System.out.println("AREA ALERT: Taxi " + current.getTaxiId() + " leaving 10km area. Distance: " + distFromFC);
-            }
-        } else if (distFromFC <= AREA_RADIUS_10KM) {
-            // Reset area notification flag when taxi comes back within 10km
-            hasNotifiedAreaState.update(false);
-        }
-
-        // Check speed if we have previous location
-        if (prev != null) {
-            double distance = haversine(prev.getLatitude(), prev.getLongitude(),
-                    current.getLatitude(), current.getLongitude());
-            
-            // Convert milliseconds to seconds for more accurate calculation
-            double timeDiffSeconds = (current.getTimestamp() - prev.getTimestamp()) / 1000.0;
-
-            if (timeDiffSeconds > 0 && timeDiffSeconds < 3600) { // Reasonable time diff (less than 1 hour)
-                // Calculate speed in km/h
-                double speedKmh = (distance / timeDiffSeconds) * 3600;
-                
-                Boolean hasNotifiedSpeed = hasNotifiedSpeedState.value();
-                Long lastSpeedNotifyTime = lastSpeedNotificationTime.value();
-
-                if (speedKmh > SPEED_LIMIT_KMH) {
-                    // Only notify if we haven't notified recently (cooldown period)
-                    if (lastSpeedNotifyTime == null || 
-                        (current.getTimestamp() - lastSpeedNotifyTime) > NOTIFICATION_COOLDOWN_MS) {
-                        
-                        String notification = String.format(
-                                "{\"type\":\"SPEED_VIOLATION\",\"taxiId\":\"%s\",\"speed\":%.2f,\"limit\":%.2f,\"lat\":%.6f,\"lon\":%.6f,\"timestamp\":%d}",
-                                current.getTaxiId(), speedKmh, SPEED_LIMIT_KMH, 
-                                current.getLatitude(), current.getLongitude(), current.getTimestamp());
-                        out.collect(notification);
-                        
-                        hasNotifiedSpeedState.update(true);
-                        lastSpeedNotificationTime.update(current.getTimestamp());
-                        
-                        System.out.println("SPEED ALERT: Taxi " + current.getTaxiId() + " speeding at " + speedKmh + " km/h");
-                    }
-                } else {
-                    // Reset speed notification flag when taxi slows down
-                    hasNotifiedSpeedState.update(false);
-                }
-            }
-        }
-
-        // Update last location
-        lastLocationState.update(current);
-    }
-    
-    private void clearAllState() throws Exception {
-        lastLocationState.clear();
-        hasNotifiedSpeedState.clear();
-        hasNotifiedAreaState.clear();
-        lastSpeedNotificationTime.clear();
-        lastAreaNotificationTime.clear();
-        isActiveState.clear();
-    }
-}
-
-    // Updated PropagateToDashboard to filter out taxis outside 15km area
-    static class PropagateToDashboard extends KeyedProcessFunction<String, TaxiData, String> {
-        private transient MapState<String, TaxiData> activeTaxisState;
-        private transient MapState<String, TaxiData> lastLocationState;
-        private transient ValueState<Double> cumulativeTotalDistanceState;
-        private static final long TAXI_TIMEOUT_MS = 300000; // 5 minutes
-
-        @Override
-        public void open(Configuration parameters) throws Exception {
-            activeTaxisState = getRuntimeContext().getMapState(
-                    new MapStateDescriptor<>("activeTaxis", Types.STRING, TypeInformation.of(TaxiData.class)));
-            
-            lastLocationState = getRuntimeContext().getMapState(
-                    new MapStateDescriptor<>("lastLocation", Types.STRING, TypeInformation.of(TaxiData.class)));
-            
-            cumulativeTotalDistanceState = getRuntimeContext().getState(
-                    new ValueStateDescriptor<>("cumulativeTotalDistance", Double.class));
-        }
-
-        @Override
-        public void processElement(TaxiData value, Context ctx, Collector<String> out) throws Exception {
-            long currentTime = value.getTimestamp();
-            String taxiId = value.getTaxiId();
-            
-            // Check if taxi is within 15km of Forbidden City
-            double distFromFC = haversine(value.getLatitude(), value.getLongitude(),
-                    FORBIDDEN_CITY_LAT, FORBIDDEN_CITY_LON);
-            
-            // If taxi is outside 15km area, remove it from tracking and don't process
-            if (distFromFC > AREA_RADIUS_15KM) {
-                activeTaxisState.remove(taxiId);
-                // Don't remove from lastLocationState as we still need it for distance calculation
-                // when the taxi returns
-                
-                // Continue with statistics calculation without this taxi
+            if (first == null) {
+                first = current;
+                totalDist = 0.0;
             } else {
-                // Taxi is within area, process normally
-                TaxiData previousLocation = lastLocationState.get(taxiId);
-                double cumulativeTotal = cumulativeTotalDistanceState.value() != null ? 
-                    cumulativeTotalDistanceState.value() : 0.0;
-                
-                // Calculate additional distance if we have a previous location
-                if (previousLocation != null) {
-                    double additionalDistance = haversine(
-                        previousLocation.getLatitude(), previousLocation.getLongitude(),
-                        value.getLatitude(), value.getLongitude()
-                    );
-                    cumulativeTotal += additionalDistance;
-                    cumulativeTotalDistanceState.update(cumulativeTotal);
-                }
-                
-                // Update states for active taxi
-                activeTaxisState.put(taxiId, value);
-                lastLocationState.put(taxiId, value);
+                double dist = haversine(last.getLatitude(), last.getLongitude(),
+                        current.getLatitude(), current.getLongitude());
+                totalDist += dist;
             }
-            
-            // Clean up inactive taxis (haven't sent data in 5 minutes)
-            Set<String> taxisToRemove = new HashSet<>();
-            for (Map.Entry<String, TaxiData> entry : activeTaxisState.entries()) {
-                if (currentTime - entry.getValue().getTimestamp() > TAXI_TIMEOUT_MS) {
-                    taxisToRemove.add(entry.getKey());
-                }
+
+            firstPoint.update(first);
+            lastPoint.update(current);
+            totalDistance.update(totalDist);
+
+            long timeDiffMs = current.getTimestamp() - first.getTimestamp();
+            if (timeDiffMs > 0) {
+                double hours = timeDiffMs / 3600000.0;
+                double avgSpeed = totalDist / hours;
+                out.collect(new TaxiAverageSpeed(current.getTaxiId(), avgSpeed));
             }
-            
-            // Remove inactive taxis from activeTaxisState
-            for (String inactiveTaxiId : taxisToRemove) {
-                activeTaxisState.remove(inactiveTaxiId);
-            }
-            
-            // Calculate statistics for active taxis only (within 15km area)
-            int activeTaxiCount = 0;
-            for (Map.Entry<String, TaxiData> entry : activeTaxisState.entries()) {
-                activeTaxiCount++;
-            }
-            
-            double cumulativeTotal = cumulativeTotalDistanceState.value() != null ? 
-                cumulativeTotalDistanceState.value() : 0.0;
-            
-            // Create dashboard statistics JSON
-            String stats = String.format(
-                "{\"activeTaxis\":%d,\"totalDistance\":%.2f,\"timestamp\":%d}", 
-                activeTaxiCount, cumulativeTotal, currentTime
-            );
-            
-            out.collect(stats);
+        }
+
+        private double haversine(double lat1, double lon1, double lat2, double lon2) {
+            final int R = 6371;
+            double dLat = Math.toRadians(lat2 - lat1);
+            double dLon = Math.toRadians(lon2 - lon1);
+            double a = Math.sin(dLat / 2) * Math.sin(dLat / 2)
+                    + Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2))
+                            * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+            double c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+            return R * c;
         }
     }
 
-    // Add a filter operator to remove taxis outside the forbidden area from location updates
-    static class FilterTaxisByArea extends KeyedProcessFunction<String, TaxiData, TaxiData> {
-        private transient ValueState<Boolean> wasActiveState;
-        private transient ValueState<Long> lastSeenTimeState;
-        
-        @Override
-        public void open(Configuration parameters) throws Exception {
-            wasActiveState = getRuntimeContext().getState(
-                    new ValueStateDescriptor<>("wasActive", Boolean.class));
-            lastSeenTimeState = getRuntimeContext().getState(
-                    new ValueStateDescriptor<>("lastSeenTime", Long.class));
-        }
-        
-        @Override
-        public void processElement(TaxiData value, Context ctx, Collector<TaxiData> out) throws Exception {
-            // Calculate distance from Forbidden City
-            double distFromFC = haversine(value.getLatitude(), value.getLongitude(),
-                    FORBIDDEN_CITY_LAT, FORBIDDEN_CITY_LON);
-            
-            Boolean wasActive = wasActiveState.value();
-            boolean isCurrentlyActive = distFromFC <= AREA_RADIUS_15KM;
-            
-            if (isCurrentlyActive) {
-                // Taxi is within 15km area
-                if (wasActive == null || !wasActive) {
-                    // Taxi just became active - trigger alert
-                    String activeAlert = String.format(
-                        "{\"type\":\"TAXI_ACTIVE\",\"taxiId\":\"%s\",\"message\":\"Taxi entered monitoring area\",\"distance\":%.2f,\"lat\":%.6f,\"lon\":%.6f,\"timestamp\":%d}",
-                        value.getTaxiId(), distFromFC, value.getLatitude(), value.getLongitude(), value.getTimestamp());
-                    
-                    // You'll need to create a separate output for alerts or use a side output
-                    System.out.println("ACTIVE ALERT: " + activeAlert);
-                    // TODO: Send this alert to Redis notifications queue
-                }
-                
-                wasActiveState.update(true);
-                lastSeenTimeState.update(value.getTimestamp());
-                out.collect(value);
-                
-            } else {
-                // Taxi is outside 15km area
-                if (wasActive != null && wasActive) {
-                    // Taxi just became inactive - trigger cleanup
-                    String inactiveAlert = String.format(
-                        "{\"type\":\"TAXI_INACTIVE\",\"taxiId\":\"%s\",\"message\":\"Taxi left monitoring area - cleaning up stats\",\"distance\":%.2f,\"timestamp\":%d}",
-                        value.getTaxiId(), distFromFC, value.getTimestamp());
-                    
-                    System.out.println("INACTIVE ALERT: " + inactiveAlert);
-                    // TODO: Send cleanup command and alert
-                }
-                
-                wasActiveState.update(false);
-                // Don't emit the taxi data, but keep the state for future transitions
-            }
-        }
-    }
+    public static class GeofenceMonitor extends KeyedProcessFunction<String, TaxiData, String> {
+    private static final double FORBIDDEN_CITY_LAT = 39.916;
+    private static final double FORBIDDEN_CITY_LON = 116.397;
+    private static final double WARNING_RADIUS_KM = 10.0;
+    private static final double DROP_RADIUS_KM = 15.0;
 
-    static class TaxiCleanupOperator extends KeyedProcessFunction<String, TaxiData, String> {
-        private transient ValueState<Long> lastActiveTimeState;
-        private static final long INACTIVITY_TIMEOUT_MS = 300000; // 5 minutes
-        
-        @Override
-        public void open(Configuration parameters) throws Exception {
-            lastActiveTimeState = getRuntimeContext().getState(
-                    new ValueStateDescriptor<>("lastActiveTime", Long.class));
-        }
-        
-        @Override
-        public void processElement(TaxiData value, Context ctx, Collector<String> out) throws Exception {
-            lastActiveTimeState.update(value.getTimestamp());
-            
-            // Register a timer for cleanup check
-            ctx.timerService().registerProcessingTimeTimer(
-                ctx.timerService().currentProcessingTime() + INACTIVITY_TIMEOUT_MS);
-        }
-        
-        @Override
-        public void onTimer(long timestamp, OnTimerContext ctx, Collector<String> out) throws Exception {
-            Long lastActiveTime = lastActiveTimeState.value();
-            long currentTime = ctx.timerService().currentProcessingTime();
-            
-            if (lastActiveTime != null && (currentTime - lastActiveTime) >= INACTIVITY_TIMEOUT_MS) {
-                // Taxi has been inactive for too long - trigger cleanup
-                String cleanupCommand = String.format(
-                    "{\"type\":\"CLEANUP_TAXI\",\"taxiId\":\"%s\",\"reason\":\"inactivity_timeout\",\"timestamp\":%d}",
-                    ctx.getCurrentKey(), currentTime);
-                
-                out.collect(cleanupCommand);
-                
-                // Clear the state
-                lastActiveTimeState.clear();
-            }
-        }
-    }
-
-    static class RedisCleanupCommand {
-        private final String taxiId;
-        private final String command;
-        
-        public RedisCleanupCommand(String taxiId, String command) {
-            this.taxiId = taxiId;
-            this.command = command;
-        }
-        
-        public String getTaxiId() { return taxiId; }
-        public String getCommand() { return command; }
-    }
-
-
-
-    static class TaxiCleanupSink extends RichSinkFunction<RedisCleanupCommand> {
-    private final String redisHost;
-    private final int redisPort;
-    private transient JedisPool jedisPool;
-    
-    public TaxiCleanupSink(String redisHost, int redisPort) {
-        this.redisHost = redisHost;
-        this.redisPort = redisPort;
-    }
-    
     @Override
-    public void open(Configuration parameters) throws Exception {
-        super.open(parameters);
-        JedisPoolConfig config = new JedisPoolConfig();
-        config.setMaxTotal(10);
-        config.setMaxIdle(5);
-        config.setMinIdle(1);
-        config.setTestOnBorrow(true);
-        config.setTestOnReturn(true);
-        config.setTestWhileIdle(true);
-        
-        this.jedisPool = new JedisPool(config, redisHost, redisPort);
-    }
-    
-    @Override
-    public void invoke(RedisCleanupCommand command, Context context) throws Exception {
-        try (Jedis jedis = jedisPool.getResource()) {
-            String taxiKey = "taxi_" + command.getTaxiId();
-            
-            // Clean up all taxi-related data
-            jedis.hdel("taxi_location", taxiKey);
-            jedis.hdel("taxi_speed", taxiKey);
-            jedis.hdel("average_speed", taxiKey);
-            jedis.hdel("taxi_distance", taxiKey);
-            
-            System.out.println("Cleaned up Redis data for taxi: " + command.getTaxiId());
-        } catch (Exception e) {
-            System.err.println("Error cleaning up Redis data for taxi " + command.getTaxiId() + ": " + e.getMessage());
-            throw e;
-        }
-    }
-    
-    @Override
-    public void close() throws Exception {
-        if (jedisPool != null) {
-            jedisPool.close();
-        }
-        super.close();
-    }
-}
+    public void processElement(TaxiData taxi, Context ctx, Collector<String> out) throws Exception {
+        double distance = haversine(
+                FORBIDDEN_CITY_LAT, FORBIDDEN_CITY_LON,
+                taxi.getLatitude(), taxi.getLongitude());
 
-static class SpeedMonitoringSink extends RichSinkFunction<TaxiSpeed> {
-    private final String redisHost;
-    private final int redisPort;
-    private final double speedLimit;
-    private transient JedisPool jedisPool;
-    
-    public SpeedMonitoringSink(String redisHost, int redisPort, double speedLimit) {
-        this.redisHost = redisHost;
-        this.redisPort = redisPort;
-        this.speedLimit = speedLimit;
-    }
-    
-    @Override
-    public void open(Configuration parameters) throws Exception {
-        super.open(parameters);
-        JedisPoolConfig config = new JedisPoolConfig();
-        this.jedisPool = new JedisPool(config, redisHost, redisPort);
-    }
-    
-    @Override
-    public void invoke(TaxiSpeed speedData, Context context) throws Exception {
-        try (Jedis jedis = jedisPool.getResource()) {
-            String taxiKey = "taxi_" + speedData.getTaxiId();
-            double speed = speedData.getSpeed();
-            
-            // Store current speed
-            jedis.hset("taxi_speed", taxiKey, String.format("%.2f", speed));
-            
-            // Handle speeding incidents
-            if (speed > speedLimit) {
-                String speedValue = String.format("%.2f km/h", speed);
-                jedis.hset("speeding_incidents", taxiKey, speedValue);
-                
-                // Log speeding incident
-                System.out.println("SPEEDING: Taxi " + speedData.getTaxiId() + 
-                                 " at " + speed + " km/h (limit: " + speedLimit + " km/h)");
-            } else {
-                // Remove from speeding incidents if speed is now within limit
-                jedis.hdel("speeding_incidents", taxiKey);
-            }
-        } catch (Exception e) {
-            System.err.println("Error processing speed data: " + e.getMessage());
-            throw e;
+        if (distance > WARNING_RADIUS_KM && distance <= DROP_RADIUS_KM) {
+            String timeStr = ALERT_DATE_FORMAT.format(new Date(taxi.getTimestamp()));
+            out.collect(String.format(
+                    "GEOFENCE: Taxi %s at (%.6f,%.6f) is %.1f km from center at %s",
+                    taxi.getTaxiId(),
+                    taxi.getLatitude(), taxi.getLongitude(),
+                    distance,
+                    timeStr));
         }
     }
-    
-    @Override
-    public void close() throws Exception {
-        if (jedisPool != null) {
-            jedisPool.close();
-        }
-        super.close();
+
+    private double haversine(double lat1, double lon1, double lat2, double lon2) {
+        final int R = 6371;
+        double dLat = Math.toRadians(lat2 - lat1);
+        double dLon = Math.toRadians(lon2 - lon1);
+        double a = Math.sin(dLat / 2) * Math.sin(dLat / 2)
+                + Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2))
+                        * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+        double c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        return R * c;
     }
 }
 }
