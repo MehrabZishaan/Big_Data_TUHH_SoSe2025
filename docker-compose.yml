@@ -1,7 +1,4 @@
-version: '3.8'
-
 services:
-
   zookeeper:
     image: zookeeper:3.8
     container_name: zookeeper
@@ -74,7 +71,7 @@ services:
       - KAFKA_BOOTSTRAP=kafka:9092
       - KAFKA_TOPIC=taxi_data
       - DATA_DIR=/taxi_data
-      - SPEED_FACTOR=1000.0
+      - SPEED_FACTOR=100.0
     volumes:
       - ./kafka-producer/taxi_data:/taxi_data
     networks:
@@ -88,10 +85,41 @@ services:
       - ALLOW_EMPTY_PASSWORD=yes
     ports:
       - "6379:6379"
+    expose:
+      - 6379
     networks:
       - flink-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
     volumes:
-      - redis-data:/data
+      - /data
+
+  node-backend:
+    build: ./node-backend
+    container_name: node-backend
+    ports:
+      - "5000:5000"
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - PORT=5000
+    networks:
+      - flink-net
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: npm run dev
+
+  frontend:
+    build: ./frontend
+    container_name: frontend
+    ports:
+      - "5173:80"
+    depends_on:
+      - node-backend
 
 networks:
   flink-net:
@@ -99,4 +127,3 @@ networks:
 
 volumes:
   kafka-data:
-  redis-data:
