@@ -137,3 +137,4 @@ nb-configuration.xml
 ## Miscellaneous
 ##############################
 *.log
+kafka-producer/taxi_data/

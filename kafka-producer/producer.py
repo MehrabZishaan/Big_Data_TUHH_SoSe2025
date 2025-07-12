@@ -14,7 +14,7 @@ conf = {
 producer = Producer(conf)
 
 # Read environment variables
-speed_factor = float(os.getenv("SPEED_FACTOR", "1.0"))
+speed_factor = float(os.getenv("SPEED_FACTOR", "1000.0"))
 debug = os.getenv("DEBUG", "false").lower() == "true"
 dry_run = os.getenv("DRY_RUN", "false").lower() == "true"
 
