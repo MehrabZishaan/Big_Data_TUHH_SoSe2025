@@ -1,0 +1,1 @@
+LRANGE alerts 0 -1
