@@ -27,6 +27,11 @@ import org.apache.flink.streaming.connectors.redis.common.mapper.RedisCommand;
 import org.apache.flink.streaming.connectors.redis.common.mapper.RedisCommandDescription;
 import org.apache.flink.streaming.connectors.redis.common.mapper.RedisMapper;
 
+import redis.clients.jedis.Jedis;
+import redis.clients.jedis.JedisPool;
+import redis.clients.jedis.JedisPoolConfig;
+import org.apache.flink.streaming.api.functions.sink.RichSinkFunction;
+
 import org.apache.flink.util.Collector;
 
 import java.io.IOException;
@@ -112,6 +117,22 @@ public class Main {
             .process(new FilterTaxisByArea())
             .name("Filter Taxis by Area");
 
+            // Cleanup handling stream
+            DataStream<String> notifications = filteredTaxiData
+            .keyBy(TaxiData::getTaxiId)
+            .process(new NotifyDashboardOperators())
+            .name("Notify Dashboard with Cleanup");
+
+    // Create cleanup commands from notification stream
+    DataStream<RedisCleanupCommand> cleanupCommands = notifications
+            .filter(notification -> notification.contains("TAXI_CLEANUP") || notification.contains("CLEANUP_TAXI"))
+            .map(notification -> {
+                // Extract taxi ID from notification
+                String taxiId = extractTaxiIdFromNotification(notification);
+                return new RedisCleanupCommand(taxiId, "cleanup");
+            })
+            .name("Generate Cleanup Commands");
+
         // Store information operator
         DataStream<String> storeInfo = filteredTaxiData
                 .keyBy(TaxiData::getTaxiId)
@@ -149,10 +170,10 @@ public class Main {
                 .name("Propagate Location Information to Dashboard");
 
         // Notify dashboard operators (speeding and area violations)
-        DataStream<String> notifications = filteredTaxiData
-                .keyBy(TaxiData::getTaxiId)
-                .process(new NotifyDashboardOperators())
-                .name("Notify Dashboard Once");
+        // DataStream<String> notifications = filteredTaxiData
+        //         .keyBy(TaxiData::getTaxiId)
+        //         .process(new NotifyDashboardOperators())
+        //         .name("Notify Dashboard Once");
         
         // Configure Redis connection
         FlinkJedisPoolConfig redisCfg = new FlinkJedisPoolConfig.Builder()
@@ -180,22 +201,11 @@ public class Main {
     }));
 
         // Sink for speed data
-        enriched.addSink(new RedisSink<>(redisCfg, new RedisMapper<TaxiSpeed>() {
-            @Override
-            public RedisCommandDescription getCommandDescription() {
-                return new RedisCommandDescription(RedisCommand.HSET, "taxi_speed");
-            }
+   enriched.addSink(new SpeedMonitoringSink(redisHost, 6379, SPEED_LIMIT_KMH))
+    .name("Monitor Speed and Violations");
 
-            @Override
-            public String getKeyFromData(TaxiSpeed data) {
-                return "taxi_" + data.getTaxiId();
-            }
-
-            @Override
-            public String getValueFromData(TaxiSpeed data) {
-                return String.format("%.2f", data.getSpeed());
-            }
-        }));
+      cleanupCommands.addSink(new TaxiCleanupSink(redisHost, 6379))
+    .name("Cleanup All Taxi Data");
 
         // Sink for average speed data
         avgSpeeds.addSink(new RedisSink<>(redisCfg, new RedisMapper<TaxiAverageSpeed>() {
@@ -507,15 +517,24 @@ public class Main {
             }
         }
     }
-
-    static class NotifyDashboardOperators extends KeyedProcessFunction<String, TaxiData, String> {
+private static String extractTaxiIdFromNotification(String notification) {
+    try {
+        int start = notification.indexOf("\"taxiId\":\"") + 10;
+        int end = notification.indexOf("\"", start);
+        return notification.substring(start, end);
+    } catch (Exception e) {
+        System.err.println("Error extracting taxi ID from notification: " + notification);
+        return "unknown";
+    }
+}
+static class NotifyDashboardOperators extends KeyedProcessFunction<String, TaxiData, String> {
     private transient ValueState<TaxiData> lastLocationState;
     private transient ValueState<Boolean> hasNotifiedSpeedState;
     private transient ValueState<Boolean> hasNotifiedAreaState;
     private transient ValueState<Long> lastSpeedNotificationTime;
     private transient ValueState<Long> lastAreaNotificationTime;
+    private transient ValueState<Boolean> isActiveState;
     
-    // Notification cooldown period (5 seconds)
     private static final long NOTIFICATION_COOLDOWN_MS = 5000;
 
     @Override
@@ -530,32 +549,44 @@ public class Main {
                 new ValueStateDescriptor<>("lastSpeedNotificationTime", Long.class));
         lastAreaNotificationTime = getRuntimeContext().getState(
                 new ValueStateDescriptor<>("lastAreaNotificationTime", Long.class));
+        isActiveState = getRuntimeContext().getState(
+                new ValueStateDescriptor<>("isActive", Boolean.class));
     }
 
     @Override
     public void processElement(TaxiData current, Context ctx, Collector<String> out) throws Exception {
         TaxiData prev = lastLocationState.value();
+        Boolean wasActive = isActiveState.value();
         
         // Calculate distance from Forbidden City
         double distFromFC = haversine(current.getLatitude(), current.getLongitude(),
                 FORBIDDEN_CITY_LAT, FORBIDDEN_CITY_LON);
 
-        // Check if taxi is outside 15km area - if so, clear all state and stop processing
+        // Check if taxi is outside 15km area
         if (distFromFC > AREA_RADIUS_15KM) {
-            // Clear all state for this taxi
-            lastLocationState.clear();
-            hasNotifiedSpeedState.clear();
-            hasNotifiedAreaState.clear();
-            lastSpeedNotificationTime.clear();
-            lastAreaNotificationTime.clear();
-            
-            // Send removal notification to dashboard
-            String removalNotification = String.format(
-                    "{\"type\":\"TAXI_REMOVED\",\"taxiId\":\"%s\",\"message\":\"Taxi left monitoring area\",\"distance\":%.2f,\"timestamp\":%d}",
+            if (wasActive == null || wasActive) {
+                // Taxi just left the 15km area - trigger cleanup
+                String cleanupNotification = String.format(
+                    "{\"type\":\"TAXI_CLEANUP\",\"taxiId\":\"%s\",\"message\":\"Taxi left monitoring area - stats cleared\",\"distance\":%.2f,\"timestamp\":%d}",
                     current.getTaxiId(), distFromFC, current.getTimestamp());
-            out.collect(removalNotification);
+                out.collect(cleanupNotification);
+                
+                // Clear all state for this taxi
+                clearAllState();
+            }
             return; // Don't process further
         }
+
+        // Taxi is within 15km area
+        if (wasActive == null || !wasActive) {
+            // Taxi just became active
+            String activeNotification = String.format(
+                "{\"type\":\"TAXI_ACTIVE\",\"taxiId\":\"%s\",\"message\":\"Taxi entered monitoring area\",\"distance\":%.2f,\"lat\":%.6f,\"lon\":%.6f,\"timestamp\":%d}",
+                current.getTaxiId(), distFromFC, current.getLatitude(), current.getLongitude(), current.getTimestamp());
+            out.collect(activeNotification);
+        }
+        
+        isActiveState.update(true);
 
         // Check if leaving 10km area
         Boolean hasNotifiedArea = hasNotifiedAreaState.value();
@@ -621,6 +652,15 @@ public class Main {
 
         // Update last location
         lastLocationState.update(current);
+    }
+    
+    private void clearAllState() throws Exception {
+        lastLocationState.clear();
+        hasNotifiedSpeedState.clear();
+        hasNotifiedAreaState.clear();
+        lastSpeedNotificationTime.clear();
+        lastAreaNotificationTime.clear();
+        isActiveState.clear();
     }
 }
 
@@ -714,19 +754,217 @@ public class Main {
 
     // Add a filter operator to remove taxis outside the forbidden area from location updates
     static class FilterTaxisByArea extends KeyedProcessFunction<String, TaxiData, TaxiData> {
+        private transient ValueState<Boolean> wasActiveState;
+        private transient ValueState<Long> lastSeenTimeState;
+        
+        @Override
+        public void open(Configuration parameters) throws Exception {
+            wasActiveState = getRuntimeContext().getState(
+                    new ValueStateDescriptor<>("wasActive", Boolean.class));
+            lastSeenTimeState = getRuntimeContext().getState(
+                    new ValueStateDescriptor<>("lastSeenTime", Long.class));
+        }
         
         @Override
         public void processElement(TaxiData value, Context ctx, Collector<TaxiData> out) throws Exception {
             // Calculate distance from Forbidden City
             double distFromFC = haversine(value.getLatitude(), value.getLongitude(),
                     FORBIDDEN_CITY_LAT, FORBIDDEN_CITY_LON);
-            System.out.println("Processing taxi outside zone " + value.getTaxiId() + " at distance " + distFromFC + "lat: " + value.getLatitude() + "lon: " + value.getLongitude() );
-            // Only emit taxis that are within 15km of the Forbidden City
-            if (distFromFC <= AREA_RADIUS_15KM) {
-                System.out.println("Processing taxi " + value.getTaxiId() + " at distance " + distFromFC);
+            
+            Boolean wasActive = wasActiveState.value();
+            boolean isCurrentlyActive = distFromFC <= AREA_RADIUS_15KM;
+            
+            if (isCurrentlyActive) {
+                // Taxi is within 15km area
+                if (wasActive == null || !wasActive) {
+                    // Taxi just became active - trigger alert
+                    String activeAlert = String.format(
+                        "{\"type\":\"TAXI_ACTIVE\",\"taxiId\":\"%s\",\"message\":\"Taxi entered monitoring area\",\"distance\":%.2f,\"lat\":%.6f,\"lon\":%.6f,\"timestamp\":%d}",
+                        value.getTaxiId(), distFromFC, value.getLatitude(), value.getLongitude(), value.getTimestamp());
+                    
+                    // You'll need to create a separate output for alerts or use a side output
+                    System.out.println("ACTIVE ALERT: " + activeAlert);
+                    // TODO: Send this alert to Redis notifications queue
+                }
+                
+                wasActiveState.update(true);
+                lastSeenTimeState.update(value.getTimestamp());
                 out.collect(value);
+                
+            } else {
+                // Taxi is outside 15km area
+                if (wasActive != null && wasActive) {
+                    // Taxi just became inactive - trigger cleanup
+                    String inactiveAlert = String.format(
+                        "{\"type\":\"TAXI_INACTIVE\",\"taxiId\":\"%s\",\"message\":\"Taxi left monitoring area - cleaning up stats\",\"distance\":%.2f,\"timestamp\":%d}",
+                        value.getTaxiId(), distFromFC, value.getTimestamp());
+                    
+                    System.out.println("INACTIVE ALERT: " + inactiveAlert);
+                    // TODO: Send cleanup command and alert
+                }
+                
+                wasActiveState.update(false);
+                // Don't emit the taxi data, but keep the state for future transitions
             }
-            // Taxis outside 15km area are simply not emitted (filtered out)
         }
     }
+
+    static class TaxiCleanupOperator extends KeyedProcessFunction<String, TaxiData, String> {
+        private transient ValueState<Long> lastActiveTimeState;
+        private static final long INACTIVITY_TIMEOUT_MS = 300000; // 5 minutes
+        
+        @Override
+        public void open(Configuration parameters) throws Exception {
+            lastActiveTimeState = getRuntimeContext().getState(
+                    new ValueStateDescriptor<>("lastActiveTime", Long.class));
+        }
+        
+        @Override
+        public void processElement(TaxiData value, Context ctx, Collector<String> out) throws Exception {
+            lastActiveTimeState.update(value.getTimestamp());
+            
+            // Register a timer for cleanup check
+            ctx.timerService().registerProcessingTimeTimer(
+                ctx.timerService().currentProcessingTime() + INACTIVITY_TIMEOUT_MS);
+        }
+        
+        @Override
+        public void onTimer(long timestamp, OnTimerContext ctx, Collector<String> out) throws Exception {
+            Long lastActiveTime = lastActiveTimeState.value();
+            long currentTime = ctx.timerService().currentProcessingTime();
+            
+            if (lastActiveTime != null && (currentTime - lastActiveTime) >= INACTIVITY_TIMEOUT_MS) {
+                // Taxi has been inactive for too long - trigger cleanup
+                String cleanupCommand = String.format(
+                    "{\"type\":\"CLEANUP_TAXI\",\"taxiId\":\"%s\",\"reason\":\"inactivity_timeout\",\"timestamp\":%d}",
+                    ctx.getCurrentKey(), currentTime);
+                
+                out.collect(cleanupCommand);
+                
+                // Clear the state
+                lastActiveTimeState.clear();
+            }
+        }
+    }
+
+    static class RedisCleanupCommand {
+        private final String taxiId;
+        private final String command;
+        
+        public RedisCleanupCommand(String taxiId, String command) {
+            this.taxiId = taxiId;
+            this.command = command;
+        }
+        
+        public String getTaxiId() { return taxiId; }
+        public String getCommand() { return command; }
+    }
+
+
+
+    static class TaxiCleanupSink extends RichSinkFunction<RedisCleanupCommand> {
+    private final String redisHost;
+    private final int redisPort;
+    private transient JedisPool jedisPool;
+    
+    public TaxiCleanupSink(String redisHost, int redisPort) {
+        this.redisHost = redisHost;
+        this.redisPort = redisPort;
+    }
+    
+    @Override
+    public void open(Configuration parameters) throws Exception {
+        super.open(parameters);
+        JedisPoolConfig config = new JedisPoolConfig();
+        config.setMaxTotal(10);
+        config.setMaxIdle(5);
+        config.setMinIdle(1);
+        config.setTestOnBorrow(true);
+        config.setTestOnReturn(true);
+        config.setTestWhileIdle(true);
+        
+        this.jedisPool = new JedisPool(config, redisHost, redisPort);
+    }
+    
+    @Override
+    public void invoke(RedisCleanupCommand command, Context context) throws Exception {
+        try (Jedis jedis = jedisPool.getResource()) {
+            String taxiKey = "taxi_" + command.getTaxiId();
+            
+            // Clean up all taxi-related data
+            jedis.hdel("taxi_location", taxiKey);
+            jedis.hdel("taxi_speed", taxiKey);
+            jedis.hdel("average_speed", taxiKey);
+            jedis.hdel("taxi_distance", taxiKey);
+            
+            System.out.println("Cleaned up Redis data for taxi: " + command.getTaxiId());
+        } catch (Exception e) {
+            System.err.println("Error cleaning up Redis data for taxi " + command.getTaxiId() + ": " + e.getMessage());
+            throw e;
+        }
+    }
+    
+    @Override
+    public void close() throws Exception {
+        if (jedisPool != null) {
+            jedisPool.close();
+        }
+        super.close();
+    }
+}
+
+static class SpeedMonitoringSink extends RichSinkFunction<TaxiSpeed> {
+    private final String redisHost;
+    private final int redisPort;
+    private final double speedLimit;
+    private transient JedisPool jedisPool;
+    
+    public SpeedMonitoringSink(String redisHost, int redisPort, double speedLimit) {
+        this.redisHost = redisHost;
+        this.redisPort = redisPort;
+        this.speedLimit = speedLimit;
+    }
+    
+    @Override
+    public void open(Configuration parameters) throws Exception {
+        super.open(parameters);
+        JedisPoolConfig config = new JedisPoolConfig();
+        this.jedisPool = new JedisPool(config, redisHost, redisPort);
+    }
+    
+    @Override
+    public void invoke(TaxiSpeed speedData, Context context) throws Exception {
+        try (Jedis jedis = jedisPool.getResource()) {
+            String taxiKey = "taxi_" + speedData.getTaxiId();
+            double speed = speedData.getSpeed();
+            
+            // Store current speed
+            jedis.hset("taxi_speed", taxiKey, String.format("%.2f", speed));
+            
+            // Handle speeding incidents
+            if (speed > speedLimit) {
+                String speedValue = String.format("%.2f km/h", speed);
+                jedis.hset("speeding_incidents", taxiKey, speedValue);
+                
+                // Log speeding incident
+                System.out.println("SPEEDING: Taxi " + speedData.getTaxiId() + 
+                                 " at " + speed + " km/h (limit: " + speedLimit + " km/h)");
+            } else {
+                // Remove from speeding incidents if speed is now within limit
+                jedis.hdel("speeding_incidents", taxiKey);
+            }
+        } catch (Exception e) {
+            System.err.println("Error processing speed data: " + e.getMessage());
+            throw e;
+        }
+    }
+    
+    @Override
+    public void close() throws Exception {
+        if (jedisPool != null) {
+            jedisPool.close();
+        }
+        super.close();
+    }
+}
 }
