@@ -30,20 +30,13 @@ docker exec -it kafka bash
 Then inside the Kafka container:
 
 ```bash
-kafka-topics.sh --create --topic taxi_data \
-  --bootstrap-server localhost:9092 \
-  --replication-factor 1 \
-  --partitions 1
+kafka-topics.sh --create --topic taxi_data --bootstrap-server localhost:9092 --replication-factor 1 --partitions 1
 ```
 
 To check the first few messages (optional):
 
 ```bash
-kafka-console-consumer.sh \
-  --bootstrap-server localhost:9092 \
-  --topic taxi_data \
-  --from-beginning \
-  --max-messages 5
+kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic taxi_data --from-beginning --max-messages 5
 ```
 
 ### Step 3: Build the Flink Job
@@ -135,3 +128,34 @@ kafka-console-consumer.sh \
 - Redis holds the final values for querying or dashboard use
 
 Everything is now ready for real-time taxi tracking!
+
+
+
+## Regular Commands
+### Start everything and build all images:
+```bash
+docker-compose up --build
+```
+### If you changed anything inside flink-job/
+```bash
+docker-compose build flink-jobmanager
+docker-compose up -d flink-jobmanager
+```
+
+### OR rebuild all services cleanly:
+```bash
+docker-compose up --build -d
+```
+
+### Common Errors
+Frequent error on Windows
+`Ports are not available: listen tcp 0.0.0.0/50070: bind: An attempt was made to access a socket in a way forbidden by its access permissions`
+
+```bash
+net stop winnat
+net start winnat
+```
+### Run Flink Job
+```bash
+docker exec -it flink-jobmanager ./bin/flink run -c com.example.flink.Main /opt/flink/usrlib/taxi-flink-job-1.0-SNAPSHOT.jar --kafka.bootstrap.servers kafka:9092 --kafka.topic taxi_data --redis.host redis
+```

@@ -9,6 +9,11 @@ services:
       - "2181:2181"
     networks:
       - flink-net
+    healthcheck:
+      test: ["CMD", "echo", "ruok", "|", "nc", "localhost", "2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   kafka:
     image: wurstmeister/kafka:2.13-2.7.0
@@ -22,12 +27,20 @@ services:
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
     depends_on:
-      - zookeeper
+      zookeeper:
+        condition: service_healthy
     networks:
       - flink-net
+    healthcheck:
+      test: ["CMD", "kafka-topics.sh", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+    volumes:
+      - kafka-data:/var/lib/kafka/data
 
   flink-jobmanager:
-    image: flink:1.17.1-scala_2.12-java11
+    build: ./flink-job
     container_name: flink-jobmanager
     command: jobmanager
     ports:
@@ -35,7 +48,8 @@ services:
     environment:
       - JOB_MANAGER_RPC_ADDRESS=flink-jobmanager
     depends_on:
-      - kafka
+      kafka:
+        condition: service_healthy
     networks:
       - flink-net
 
@@ -54,13 +68,18 @@ services:
     build: ./kafka-producer
     container_name: kafka-producer
     depends_on:
-      - kafka
+      kafka:
+        condition: service_healthy
     environment:
-      - KAFKA_BROKER=kafka:9092
+      - KAFKA_BOOTSTRAP=kafka:9092
+      - KAFKA_TOPIC=taxi_data
+      - DATA_DIR=/taxi_data
+      - SPEED_FACTOR=1000.0
     volumes:
-    - ./kafka-producer/taxi_data:/taxi_data
+      - ./kafka-producer/taxi_data:/taxi_data
     networks:
       - flink-net
+    restart: on-failure
 
   redis:
     image: redis:7.0
@@ -71,7 +90,13 @@ services:
       - "6379:6379"
     networks:
       - flink-net
+    volumes:
+      - redis-data:/data
 
 networks:
   flink-net:
     driver: bridge
+
+volumes:
+  kafka-data:
+  redis-data:
