@@ -72,44 +72,47 @@ docker-compose logs -f
 http://localhost:5173
 ```
 ## Simulation Speed
-To adjust the speed of data replay, modify the `SPEED_FACTOR` environment variable in the `docker-compose.yml` file under ` kafka-producer` container or set it directly in the terminal:
+To adjust the speed of data replay, modify the `SPEED_FACTOR` environment variable in the `docker-compose.yml` file under `kafka-producer` container or set it directly in the terminal:
 
 ```bash
 export SPEED_FACTOR=0.1  # Default is 0.1, increase for faster replay
 ```
 
 ## Dockerhub Images
-We have pre-built Docker images available on DockerHub for easy deployment:
+We have pre-built Docker images available on DockerHub for easy deployment.
+These are already configured in the `docker-compose-dockerhub.yml` file.
 - **flink-job**: ` hasebsiddiqui/flink-job:latest`
 - **kafka-producer**: `hasebsiddiqui/kafka-producer:latest`
 - **Node.js Backend**: `hasebsiddiqui/node-backend:latest`
-- **Web Dashboard**: `hasebsiddiqui/web-dashboard:latest`
+- **Web Dashboard**: `hasebsiddiqui/frontend:latest`
 
 
 ## 📈 Performance Optimizations
 
 ### Kafka Producer Optimizations
+
 #### Memory Management
 
-- Chunk-based Processing: Configurable `CHUNK_SIZE` (default: 1000) prevents memory exhaustion with large datasets
-- Lazy Loading: Files loaded in chunks only when needed, maintaining O(k × chunk_size) memory usage
-- Buffer Management: Intelligent buffering reduces I/O operations
+- **Chunk-based Processing**: Configurable `CHUNK_SIZE` (default: 1000) prevents memory exhaustion with large datasets
+- **Lazy Loading**: Files loaded in chunks only when needed, maintaining `O(k × chunk_size)` memory usage
+- **Buffer Management**: Intelligent buffering reduces I/O operations
 
 #### Real-time Synchronization
 
-- Min-heap Event Scheduling: Ensures events with identical timestamps across multiple files are processed simultaneously
-- Temporal Ordering: Maintains accurate chronological sequence across all taxi trajectories
-- Configurable Replay Speed: SPEED_FACTOR parameter allows accelerated testing
+- **Min-heap Event Scheduling**: Ensures events with identical timestamps across multiple files are processed simultaneously
+- **Temporal Ordering**: Maintains accurate chronological sequence across all taxi trajectories
+- **Configurable Replay Speed**: `SPEED_FACTOR` parameter allows accelerated testing
 
 #### Producer Performance
 
-- Message Batching: Groups messages and flushes every 100 messages for optimal throughput
-- Buffer Overflow Handling: Automatic flush and retry mechanism prevents data loss
-- Asynchronous Delivery: Non-blocking message production with delivery callbacks
+- **Message Batching**: Groups messages and flushes every 100 messages for optimal throughput
+- **Buffer Overflow Handling**: Automatic flush and retry mechanism prevents data loss
+- **Asynchronous Delivery**: Non-blocking message production with delivery callbacks
 
 ### Flink Job Optimizations
-- `Stream Processing` - Early filtering of data to reduce load
-- `Throughput` - Parallel processing and configurable replay speeds
+
+- **Stream Processing** - Early filtering of data to reduce load
+- **Throughput** - Parallel processing and configurable replay speeds
 
 ## 📊 Dashboard Features
 

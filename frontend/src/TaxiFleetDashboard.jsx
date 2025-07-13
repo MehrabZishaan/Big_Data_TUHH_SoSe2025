@@ -85,7 +85,6 @@ const TaxiFleetDashboard = () => {
     });
 
     socket.on('realTimeData', data => {
-      console.log('Received real-time data:', data);
       setTaxiLocations(data.locations);
       setSpeeds(data.speeds);
       setAlerts(data.alerts);
