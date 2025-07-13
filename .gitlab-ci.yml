@@ -1,36 +1,29 @@
-image:
-  name: gcr.io/kaniko-project/executor:latest
-  entrypoint: [""]
+image: docker:latest
+
+services:
+  - docker:dind
 
 variables:
-  DOCKERHUB_USERNAME: $DOCKERHUB_USERNAME
-  DOCKERHUB_TOKEN: $DOCKERHUB_TOKEN
-  DOCKER_REGISTRY: docker.io
-  DOCKER_CONFIG: /kaniko/.docker/
+  DOCKER_DRIVER: overlay2
 
 stages:
   - build_and_push
 
-build_and_push_flink_job:
-  stage: build_and_push
-  script:
-    - echo "{\"auths\":{\"$DOCKER_REGISTRY\":{\"username\":\"$DOCKERHUB_USERNAME\",\"password\":\"$DOCKERHUB_TOKEN\"}}}" > /kaniko/.docker/config.json
-    - /kaniko/executor --context ./flink-job --dockerfile ./flink-job/Dockerfile --destination $DOCKER_REGISTRY/$DOCKERHUB_USERNAME/flink-job:latest
+before_script:
+  # Login to Docker Hub
+  - echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
 
-build_and_push_kafka_producer:
+build_and_push_images:
   stage: build_and_push
   script:
-    - echo "{\"auths\":{\"$DOCKER_REGISTRY\":{\"username\":\"$DOCKERHUB_USERNAME\",\"password\":\"$DOCKERHUB_TOKEN\"}}}" > /kaniko/.docker/config.json
-    - /kaniko/executor --context ./kafka-producer --dockerfile ./kafka-producer/Dockerfile --destination $DOCKER_REGISTRY/$DOCKERHUB_USERNAME/kafka-producer:latest
+    - docker build -t $DOCKERHUB_USERNAME/flink-job ./flink-job
+    - docker push $DOCKERHUB_USERNAME/flink-job
 
-build_and_push_node_backend:
-  stage: build_and_push
-  script:
-    - echo "{\"auths\":{\"$DOCKER_REGISTRY\":{\"username\":\"$DOCKERHUB_USERNAME\",\"password\":\"$DOCKERHUB_TOKEN\"}}}" > /kaniko/.docker/config.json
-    - /kaniko/executor --context ./node-backend --dockerfile ./node-backend/Dockerfile --destination $DOCKER_REGISTRY/$DOCKERHUB_USERNAME/node-backend:latest
+    - docker build -t $DOCKERHUB_USERNAME/kafka-producer ./kafka-producer
+    - docker push $DOCKERHUB_USERNAME/kafka-producer
 
-build_and_push_frontend:
-  stage: build_and_push
-  script:
-    - echo "{\"auths\":{\"$DOCKER_REGISTRY\":{\"username\":\"$DOCKERHUB_USERNAME\",\"password\":\"$DOCKERHUB_TOKEN\"}}}" > /kaniko/.docker/config.json
-    - /kaniko/executor --context ./frontend --dockerfile ./frontend/Dockerfile --destination $DOCKER_REGISTRY/$DOCKERHUB_USERNAME/frontend:latest
+    - docker build -t $DOCKERHUB_USERNAME/node-backend ./node-backend
+    - docker push $DOCKERHUB_USERNAME/node-backend
+
+    - docker build -t $DOCKERHUB_USERNAME/frontend ./frontend
+    - docker push $DOCKERHUB_USERNAME/frontend
