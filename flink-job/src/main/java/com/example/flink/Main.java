@@ -318,6 +318,8 @@ public class Main {
                     // Delete taxi location from Redis when it leaves the 15km zone
                     try (Jedis jedis = new Jedis(redisHost)) {
                         jedis.hdel("taxi_locations", taxi.getTaxiId());
+                        jedis.hdel("current_violations", taxi.getTaxiId());
+                        jedis.hdel("speeding_incidents", taxi.getTaxiId());
                         System.out.println("Deleted taxi " + taxi.getTaxiId() + " from taxi_locations in Redis");
                     } catch (Exception e) {
                         System.err.println("Failed to delete taxi " + taxi.getTaxiId() + " from Redis: " + e.getMessage());
