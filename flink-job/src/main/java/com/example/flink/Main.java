@@ -130,7 +130,9 @@ public class Main {
                         return null;
                     }
                 })
-                .filter(x -> x != null);
+                .filter(x -> x != null)
+                .keyBy(TaxiData::getTaxiId) // Key by taxi ID to track state per taxi
+                .process(new DynamicGeofenceTracker()); // Stateful processing
 
         // Configure Redis connection
         FlinkJedisPoolConfig redisCfg = new FlinkJedisPoolConfig.Builder()
@@ -254,6 +256,59 @@ public class Main {
             return d.getTime();
         } catch (ParseException e) {
             throw new IllegalArgumentException("Bad timestamp: " + s, e);
+        }
+    }
+
+    public static class GeoUtils {
+        public static double haversine(double lat1, double lon1, double lat2, double lon2) {
+            final int R = 6371;
+            double dLat = Math.toRadians(lat2 - lat1);
+            double dLon = Math.toRadians(lon2 - lon1);
+            double a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                    Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2)) *
+                            Math.sin(dLon / 2) * Math.sin(dLon / 2);
+            double c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+            return R * c;
+        }
+    }
+
+    public static class DynamicGeofenceTracker
+            extends KeyedProcessFunction<String, TaxiData, TaxiData> {
+
+        private transient ValueState<Boolean> isInZoneState;
+
+        @Override
+        public void open(Configuration parameters) {
+            ValueStateDescriptor<Boolean> descriptor = new ValueStateDescriptor<>("isInZoneState", Boolean.class);
+            isInZoneState = getRuntimeContext().getState(descriptor);
+        }
+
+        @Override
+        public void processElement(TaxiData taxi, Context ctx, Collector<TaxiData> out) throws Exception {
+            double distance = GeoUtils.haversine(
+                    FORBIDDEN_CITY_LAT,
+                    FORBIDDEN_CITY_LON,
+                    taxi.getLatitude(),
+                    taxi.getLongitude());
+
+            boolean isInsideZone = distance <= DROP_RADIUS_KM;
+            Boolean wasInsideZone = isInZoneState.value();
+
+            // If taxi is inside the zone (or just entered)
+            if (isInsideZone) {
+                // Emit data for downstream processing (speed/distance/alerts)
+                out.collect(taxi);
+            }
+
+            // Update state if status changed (e.g., entered/exited)
+            if (wasInsideZone == null || wasInsideZone != isInsideZone) {
+                isInZoneState.update(isInsideZone);
+                if (isInsideZone) {
+                    System.out.println("Taxi " + taxi.getTaxiId() + " ENTERED the zone");
+                } else {
+                    System.out.println("Taxi " + taxi.getTaxiId() + " LEFT the zone");
+                }
+            }
         }
     }
 
@@ -722,13 +777,19 @@ public class Main {
                         current.getLatitude(), current.getLongitude());
                 double timeDiffSec = (current.getTimestamp() - prev.getTimestamp()) / 1000.0;
 
-                if (timeDiffSec > 0) {
+                if (timeDiffSec > 0 && distance < 100) {// sanity check: ignore long jumps
                     double speed = (distance / timeDiffSec) * 3600; // km/h
-                    out.collect(new TaxiSpeed(
-                            current.getTaxiId(),
-                            speed,
-                            current.getTimestamp() // Pass current timestamp
-                    ));
+                    if (speed < 200) { // threshold for realistic speeds, adjust as needed
+
+                        out.collect(new TaxiSpeed(
+                                current.getTaxiId(),
+                                speed,
+                                current.getTimestamp() // Pass current timestamp
+                        ));
+                    } else {
+                        System.err.printf("Unrealistic speed %.2f km/h for Taxi %s (distance=%.2f km, Δt=%.2f sec)\n",
+                                speed, current.getTaxiId(), distance, timeDiffSec);
+                    }
                 }
             }
             lastState.update(current);
@@ -842,37 +903,37 @@ public class Main {
     }
 
     public static class GeofenceMonitor extends KeyedProcessFunction<String, TaxiData, String> {
-    private static final double FORBIDDEN_CITY_LAT = 39.916;
-    private static final double FORBIDDEN_CITY_LON = 116.397;
-    private static final double WARNING_RADIUS_KM = 10.0;
-    private static final double DROP_RADIUS_KM = 15.0;
+        private static final double FORBIDDEN_CITY_LAT = 39.916;
+        private static final double FORBIDDEN_CITY_LON = 116.397;
+        private static final double WARNING_RADIUS_KM = 10.0;
+        private static final double DROP_RADIUS_KM = 15.0;
 
-    @Override
-    public void processElement(TaxiData taxi, Context ctx, Collector<String> out) throws Exception {
-        double distance = haversine(
-                FORBIDDEN_CITY_LAT, FORBIDDEN_CITY_LON,
-                taxi.getLatitude(), taxi.getLongitude());
+        @Override
+        public void processElement(TaxiData taxi, Context ctx, Collector<String> out) throws Exception {
+            double distance = haversine(
+                    FORBIDDEN_CITY_LAT, FORBIDDEN_CITY_LON,
+                    taxi.getLatitude(), taxi.getLongitude());
 
-        if (distance > WARNING_RADIUS_KM && distance <= DROP_RADIUS_KM) {
-            String timeStr = ALERT_DATE_FORMAT.format(new Date(taxi.getTimestamp()));
-            out.collect(String.format(
-                    "GEOFENCE: Taxi %s at (%.6f,%.6f) is %.1f km from center at %s",
-                    taxi.getTaxiId(),
-                    taxi.getLatitude(), taxi.getLongitude(),
-                    distance,
-                    timeStr));
+            if (distance > WARNING_RADIUS_KM && distance <= DROP_RADIUS_KM) {
+                String timeStr = ALERT_DATE_FORMAT.format(new Date(taxi.getTimestamp()));
+                out.collect(String.format(
+                        "GEOFENCE: Taxi %s at (%.6f,%.6f) is %.1f km from center at %s",
+                        taxi.getTaxiId(),
+                        taxi.getLatitude(), taxi.getLongitude(),
+                        distance,
+                        timeStr));
+            }
+        }
+
+        private double haversine(double lat1, double lon1, double lat2, double lon2) {
+            final int R = 6371;
+            double dLat = Math.toRadians(lat2 - lat1);
+            double dLon = Math.toRadians(lon2 - lon1);
+            double a = Math.sin(dLat / 2) * Math.sin(dLat / 2)
+                    + Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2))
+                            * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+            double c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+            return R * c;
         }
     }
-
-    private double haversine(double lat1, double lon1, double lat2, double lon2) {
-        final int R = 6371;
-        double dLat = Math.toRadians(lat2 - lat1);
-        double dLon = Math.toRadians(lon2 - lon1);
-        double a = Math.sin(dLat / 2) * Math.sin(dLat / 2)
-                + Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2))
-                        * Math.sin(dLon / 2) * Math.sin(dLon / 2);
-        double c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-        return R * c;
-    }
-}
 }
