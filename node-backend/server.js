@@ -237,8 +237,8 @@ const broadcastData = async () => {
   }
 };
 
-// Broadcast data every 2 seconds
-setInterval(broadcastData, 2000);
+// Broadcast data every 5 seconds
+setInterval(broadcastData, 5000);
 
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {

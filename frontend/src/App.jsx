@@ -1,16 +1,11 @@
-
 import TaxiFleetDashboard from './TaxiFleetDashboard';
 
-
-
 function App() {
-   return (
-
-       <>
-
-   <TaxiFleetDashboard />
-   </>
-    )
+  return (
+    <>
+      <TaxiFleetDashboard />
+    </>
+  );
 }
 
 export default App;
