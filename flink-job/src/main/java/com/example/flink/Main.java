@@ -130,7 +130,9 @@ public class Main {
                         return null;
                     }
                 })
-                .filter(x -> x != null);
+                .filter(x -> x != null)
+                .keyBy(TaxiData::getTaxiId) // Key by taxi ID to track state per taxi
+                .process(new DynamicGeofenceTracker()); // Stateful processing
 
         // Configure Redis connection
         FlinkJedisPoolConfig redisCfg = new FlinkJedisPoolConfig.Builder()
@@ -254,6 +256,59 @@ public class Main {
             return d.getTime();
         } catch (ParseException e) {
             throw new IllegalArgumentException("Bad timestamp: " + s, e);
+        }
+    }
+
+    public static class GeoUtils {
+        public static double haversine(double lat1, double lon1, double lat2, double lon2) {
+            final int R = 6371;
+            double dLat = Math.toRadians(lat2 - lat1);
+            double dLon = Math.toRadians(lon2 - lon1);
+            double a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                    Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2)) *
+                            Math.sin(dLon / 2) * Math.sin(dLon / 2);
+            double c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+            return R * c;
+        }
+    }
+
+    public static class DynamicGeofenceTracker
+            extends KeyedProcessFunction<String, TaxiData, TaxiData> {
+
+        private transient ValueState<Boolean> isInZoneState;
+
+        @Override
+        public void open(Configuration parameters) {
+            ValueStateDescriptor<Boolean> descriptor = new ValueStateDescriptor<>("isInZoneState", Boolean.class);
+            isInZoneState = getRuntimeContext().getState(descriptor);
+        }
+
+        @Override
+        public void processElement(TaxiData taxi, Context ctx, Collector<TaxiData> out) throws Exception {
+            double distance = GeoUtils.haversine(
+                    FORBIDDEN_CITY_LAT,
+                    FORBIDDEN_CITY_LON,
+                    taxi.getLatitude(),
+                    taxi.getLongitude());
+
+            boolean isInsideZone = distance <= DROP_RADIUS_KM;
+            Boolean wasInsideZone = isInZoneState.value();
+
+            // If taxi is inside the zone (or just entered)
+            if (isInsideZone) {
+                // Emit data for downstream processing (speed/distance/alerts)
+                out.collect(taxi);
+            }
+
+            // Update state if status changed (e.g., entered/exited)
+            if (wasInsideZone == null || wasInsideZone != isInsideZone) {
+                isInZoneState.update(isInsideZone);
+                if (isInsideZone) {
+                    System.out.println("Taxi " + taxi.getTaxiId() + " ENTERED the zone");
+                } else {
+                    System.out.println("Taxi " + taxi.getTaxiId() + " LEFT the zone");
+                }
+            }
         }
     }
 
