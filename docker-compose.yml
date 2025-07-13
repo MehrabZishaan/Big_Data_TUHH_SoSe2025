@@ -70,10 +70,8 @@ services:
     environment:
       - KAFKA_BOOTSTRAP=kafka:9092
       - KAFKA_TOPIC=taxi_data
-      - DATA_DIR=/taxi_data
+      - DATA_DIR=taxi_data
       - SPEED_FACTOR=100.0
-    volumes:
-      - ./kafka-producer/taxi_data:/taxi_data
     networks:
       - flink-net
     restart: on-failure
