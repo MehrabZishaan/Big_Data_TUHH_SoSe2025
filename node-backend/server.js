@@ -176,7 +176,7 @@ const broadcastData = async () => {
     const [locations, speeds, alerts, statistics] = await Promise.all([
       redisClient.hGetAll('taxi_locations'),
       redisClient.hGetAll('speed'),
-      redisClient.lRange('alerts', 0, 9), // Last 10 alerts
+      redisClient.lRange('alerts', 0, 100), // Last 10 alerts
       (async () => {
         const [
           totalSpeedingTaxis,
