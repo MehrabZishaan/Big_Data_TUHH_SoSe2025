@@ -56,7 +56,8 @@ const TaxiFleetDashboard = () => {
   const DROP_RADIUS = 15000; // 15km in meters
 
   useEffect(() => {
-    const socket = io('http://localhost:5000');
+    const BASE_URL = `${window.location.protocol}//${window.location.hostname}:5000`;
+    const socket = io(BASE_URL);
 
     socket.on('connect', () => {
       setConnected(true);
@@ -84,18 +85,18 @@ const TaxiFleetDashboard = () => {
     });
 
     // Initial data fetch
-    fetchInitialData();
+    fetchInitialData(BASE_URL);
 
     return () => socket.disconnect();
   }, []);
 
-  const fetchInitialData = async () => {
+  const fetchInitialData = async (BASE_URL) => {
     try {
       const [locationsRes, speedsRes, alertsRes, statsRes] = await Promise.all([
-        fetch('http://localhost:5000/api/taxi-locations'),
-        fetch('http://localhost:5000/api/speeds'),
-        fetch('http://localhost:5000/api/alerts'),
-        fetch('http://localhost:5000/api/statistics')
+        fetch(`${BASE_URL}/api/taxi-locations`),
+        fetch(`${BASE_URL}/api/speeds`),
+        fetch(`${BASE_URL}/api/alerts`),
+        fetch(`${BASE_URL}/api/statistics`)
       ]);
 
       const locations = await locationsRes.json();
@@ -115,7 +116,7 @@ const TaxiFleetDashboard = () => {
   const getTaxiIcon = (taxiId) => {
     const isSpeeding = statistics.speedingIncidents.some(incident => incident.taxiId === taxiId);
     const isViolating = statistics.currentViolations.some(violation => violation.taxiId === taxiId);
-    
+
     if (isSpeeding) return speedingTaxiIcon;
     if (isViolating) return violatingTaxiIcon;
     return normalTaxiIcon;
@@ -163,13 +164,13 @@ const TaxiFleetDashboard = () => {
               {(true && <MapContainer
                 center={[FORBIDDEN_CITY.lat, FORBIDDEN_CITY.lng]}
                 zoom={11}
-                // style={{ height: '100%', width: '100%' }}
+              // style={{ height: '100%', width: '100%' }}
               >
                 <TileLayer
                   url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
                   attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
                 />
-                
+
                 {/* Geofence circles */}
                 <Circle
                   center={[FORBIDDEN_CITY.lat, FORBIDDEN_CITY.lng]}
@@ -262,12 +263,12 @@ const TaxiFleetDashboard = () => {
               {alerts.slice(0, 10).map((alert, index) => {
                 const formattedAlert = formatAlert(alert);
                 return (
-                  <div 
-                    key={index} 
+                  <div
+                    key={index}
                     className="text-xs p-2 rounded border-l-2"
-                    style={{ 
+                    style={{
                       backgroundColor: `${formattedAlert.color}10`,
-                      borderLeftColor: formattedAlert.color 
+                      borderLeftColor: formattedAlert.color
                     }}
                   >
                     <div style={{ color: formattedAlert.color }}>
