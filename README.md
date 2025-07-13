@@ -31,6 +31,16 @@ This system implements a complete streaming data pipeline that:
 | **Containerization** | Docker & Docker Compose | Service orchestration |
 | **Data Source** | T-Drive Dataset | Beijing taxi trajectory data |
 
+## 🌐 Final Project Deployment
+
+Our final project is deployed and accessible via the following URL:
+
+`🔗 Project URL`: [http://48.209.9.235:5173/](http://48.209.9.235:5173/)
+
+### 🕒 Availability for Grading:  
+Please access the project during our assigned session time:  
+July 25 : (9:00 – 17:00)
+
 ## 🚀 Quick Start
 
 ### Prerequisites
