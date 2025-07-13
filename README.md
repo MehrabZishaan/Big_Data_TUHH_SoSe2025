@@ -311,3 +311,15 @@ docker tag my-project_web mydockerhubuser/myapp:latest
 ```bash
 docker push mydockerhubuser/myapp:latest
 ```
+
+
+
+## 🌐 Final Project Deployment
+
+Our final project is deployed and accessible via the following URL:
+
+🔗 **Project URL:** http://48.209.9.235:5173/
+
+🕒 **Availability for Grading:**  
+Please access the project during our assigned session time:  
+**July 25 : (9:00 – 17:00)**
