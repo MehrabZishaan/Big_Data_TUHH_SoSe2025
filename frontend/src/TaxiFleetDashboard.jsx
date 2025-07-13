@@ -175,183 +175,238 @@ const TaxiFleetDashboard = () => {
         </div>
       </div>
 
-      <div className='flex h-full'>
-        {/* Main Map Area */}
-        <div className='flex-1 p-4'>
-          <div className='bg-white rounded-lg shadow h-full'>
+      {/* Main Content - Vertical Layout */}
+      <div className='flex flex-col'>
+        {/* Map Area */}
+        <div className='p-4'>
+          <div className='bg-white rounded-lg shadow'>
             <div className='p-4 border-b'>
               <h2 className='text-lg font-semibold text-gray-900'>Live Taxi Locations</h2>
             </div>
-            <div className='h-96'>
-                <MapContainer
+            {/* Map container with fixed height */}
+            <div className='relative' style={{ height: '60vh' }}>
+              <style jsx>{`
+                .leaflet-container {
+                  height: 100% !important;
+                  width: 100% !important;
+                  border-radius: 0 0 0.5rem 0.5rem;
+                }
+                .leaflet-popup-content-wrapper {
+                  border-radius: 8px;
+                }
+                .leaflet-popup-content {
+                  margin: 12px 16px;
+                  line-height: 1.4;
+                }
+                .leaflet-control-zoom {
+                  border: none !important;
+                  border-radius: 8px !important;
+                  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1) !important;
+                }
+                .leaflet-control-zoom a {
+                  border: none !important;
+                  background-color: white !important;
+                  color: #374151 !important;
+                  font-size: 18px !important;
+                  line-height: 26px !important;
+                }
+                .leaflet-control-zoom a:hover {
+                  background-color: #f3f4f6 !important;
+                }
+                .leaflet-control-zoom a:first-child {
+                  border-radius: 8px 8px 0 0 !important;
+                }
+                .leaflet-control-zoom a:last-child {
+                  border-radius: 0 0 8px 8px !important;
+                }
+              `}</style>
+              <MapContainer
+                center={[FORBIDDEN_CITY.lat, FORBIDDEN_CITY.lng]}
+                zoom={11}
+                style={{ height: '100%', width: '100%' }}
+                className='rounded-b-lg'
+              >
+                <TileLayer
+                  url='https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png'
+                  attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+                />
+
+                {/* Geofence circles */}
+                <Circle
                   center={[FORBIDDEN_CITY.lat, FORBIDDEN_CITY.lng]}
-                  zoom={11}
-                  // style={{ height: '100%', width: '100%' }}
-                >
-                  <TileLayer
-                    url='https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png'
-                    attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-                  />
+                  radius={WARNING_RADIUS}
+                  color='#ff8800'
+                  fillColor='#ff8800'
+                  fillOpacity={0.1}
+                  weight={2}
+                  dashArray="5, 5"
+                />
+                <Circle
+                  center={[FORBIDDEN_CITY.lat, FORBIDDEN_CITY.lng]}
+                  radius={DROP_RADIUS}
+                  color='#ff4444'
+                  fillColor='#ff4444'
+                  fillOpacity={0.05}
+                  weight={2}
+                  dashArray="10, 5"
+                />
 
-                  {/* Geofence circles */}
-                  <Circle
-                    center={[FORBIDDEN_CITY.lat, FORBIDDEN_CITY.lng]}
-                    radius={WARNING_RADIUS}
-                    color='#ff8800'
-                    fillColor='#ff8800'
-                    fillOpacity={0.1}
-                    weight={2}
-                  />
-                  <Circle
-                    center={[FORBIDDEN_CITY.lat, FORBIDDEN_CITY.lng]}
-                    radius={DROP_RADIUS}
-                    color='#ff4444'
-                    fillColor='#ff4444'
-                    fillOpacity={0.05}
-                    weight={2}
-                  />
-
-                  {/* Taxi markers */}
-                  {taxiLocations.map(taxi => (
-                    <Marker
-                      key={taxi.taxiId}
-                      position={[taxi.latitude, taxi.longitude]}
-                      icon={getTaxiIcon(taxi.taxiId)}
-                    >
-                      <Popup>
-                        <div className='text-sm'>
-                          <div className='font-semibold'>
-                            Taxi {taxi.taxiId}
+                {/* Taxi markers */}
+                {taxiLocations.map(taxi => (
+                  <Marker
+                    key={taxi.taxiId}
+                    position={[taxi.latitude, taxi.longitude]}
+                    icon={getTaxiIcon(taxi.taxiId)}
+                  >
+                    <Popup>
+                      <div className='text-sm min-w-48'>
+                        <div className='font-semibold text-gray-900 mb-2'>
+                          Taxi {taxi.taxiId}
+                        </div>
+                        <div className='space-y-1'>
+                          <div className='flex justify-between'>
+                            <span className='text-gray-600'>Speed:</span>
+                            <span className='font-medium'>{getTaxiSpeed(taxi.taxiId)} km/h</span>
                           </div>
-                          <div>Speed: {getTaxiSpeed(taxi.taxiId)} km/h</div>
-                          <div>
-                            Location: {taxi.latitude.toFixed(6)},{' '}
-                            {taxi.longitude.toFixed(6)}
+                          <div className='flex justify-between'>
+                            <span className='text-gray-600'>Latitude:</span>
+                            <span className='font-mono text-xs'>{taxi.latitude.toFixed(6)}</span>
                           </div>
-                          <div>
-                            Last Update:{' '}
-                            {new Date(taxi.timestamp).toLocaleTimeString()}
+                          <div className='flex justify-between'>
+                            <span className='text-gray-600'>Longitude:</span>
+                            <span className='font-mono text-xs'>{taxi.longitude.toFixed(6)}</span>
+                          </div>
+                          <div className='flex justify-between'>
+                            <span className='text-gray-600'>Updated:</span>
+                            <span className='text-xs'>{new Date(taxi.timestamp).toLocaleTimeString()}</span>
                           </div>
                         </div>
-                      </Popup>
-                    </Marker>
-                  ))}
-                </MapContainer>
+                      </div>
+                    </Popup>
+                  </Marker>
+                ))}
+              </MapContainer>
             </div>
           </div>
         </div>
 
-        {/* Sidebar */}
-        <div className='w-80 p-4 space-y-4'>
-          {/* Statistics Cards */}
-          <div className='bg-white rounded-lg shadow p-4'>
-            <h3 className='text-lg font-semibold mb-4 text-gray-900'>Fleet Statistics</h3>
-            <div className='space-y-3'>
-              <div className='flex justify-between'>
-                <span className='text-gray-600'>Currently Driving</span>
-                <span className='font-semibold text-blue-600'>
-                  {statistics.currentlyDrivingTaxis}
-                </span>
-              </div>
-              <div className='flex justify-between'>
-                <span className='text-gray-600'>Total Distance</span>
-                <span className='font-semibold text-gray-600'>
-                  {statistics.totalDistance.toFixed(2)} km
-                </span>
-              </div>
-              <div className='flex justify-between'>
-                <span className='text-red-600'>Speeding Taxis</span>
-                <span className='font-semibold text-red-600'>
-                  {statistics.totalSpeedingTaxis}
-                </span>
-              </div>
-              <div className='flex justify-between'>
-                <span className='text-orange-600'>Area Violations</span>
-                <span className='font-semibold text-orange-600'>
-                  {statistics.totalAreaViolations}
-                </span>
+        {/* Sidebar - Now below the map */}
+        <div className='p-4 pt-0'>
+          <div className='grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5 gap-4'>
+            
+            {/* Statistics Cards */}
+            <div className='bg-white rounded-lg shadow p-4'>
+              <h3 className='text-lg font-semibold mb-4 text-gray-900'>Fleet Statistics</h3>
+              <div className='space-y-3'>
+                <div className='flex justify-between items-center'>
+                  <span className='text-gray-600'>Currently Driving</span>
+                  <span className='font-semibold text-blue-600 bg-blue-50 px-2 py-1 rounded'>
+                    {taxiLocations.length} Taxis
+                  </span>
+                </div>
+                <div className='flex justify-between items-center'>
+                  <span className='text-gray-600'>Total Distance</span>
+                  <span className='font-semibold text-gray-600'>
+                    {statistics.totalDistance.toFixed(2)} km
+                  </span>
+                </div>
+                <div className='flex justify-between items-center'>
+                  <span className='text-red-600'>Speeding Taxis</span>
+                  <span className='font-semibold text-red-600 bg-red-50 px-2 py-1 rounded'>
+                    {statistics.speedingIncidents.length}
+                  </span>
+                </div>
+                <div className='flex justify-between items-center'>
+                  <span className='text-orange-600'>Area Violations</span>
+                  <span className='font-semibold text-orange-600 bg-orange-50 px-2 py-1 rounded'>
+                    {statistics.currentViolations.length}
+                  </span>
+                </div>
               </div>
             </div>
-          </div>
 
-          {/* Current Incidents */}
-          <div className='bg-white rounded-lg shadow p-4'>
-            <h3 className='text-lg font-semibold mb-4 text-gray-900'>Current Incidents</h3>
-            <div className='space-y-2 max-h-32 overflow-y-auto'>
-              {statistics.speedingIncidents.map((incident, index) => (
-                <div
-                  key={index}
-                  className='text-sm p-2 bg-red-50 rounded border-l-2 border-red-400'
-                >
-                  <div className='font-medium text-red-700'>
-                    Taxi {incident.taxiId}
-                  </div>
-                  <div className='text-red-600'>Speeding: {incident.speed}</div>
-                </div>
-              ))}
-              {statistics.currentViolations.map((violation, index) => (
-                <div
-                  key={index}
-                  className='text-sm p-2 bg-orange-50 rounded border-l-2 border-orange-400'
-                >
-                  <div className='font-medium text-orange-700'>
-                    Taxi {violation.taxiId}
-                  </div>
-                  <div className='text-orange-600'>Area Violation</div>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* Recent Alerts */}
-          <div className='bg-white rounded-lg shadow p-4'>
-            <h3 className='text-lg font-semibold mb-4 text-gray-900'>Recent Alerts</h3>
-            <div className='space-y-2 max-h-48 overflow-y-auto'>
-              {alerts.slice(0, 10).map((alert, index) => {
-                const formattedAlert = formatAlert(alert);
-                return (
+            {/* Current Incidents */}
+            <div className='bg-white rounded-lg shadow p-4'>
+              <h3 className='text-lg font-semibold mb-4 text-gray-900'>Current Incidents</h3>
+              <div className='space-y-2 overflow-y-auto' style={{ height: '300px' }}>
+                {statistics.speedingIncidents.map((incident, index) => (
                   <div
                     key={index}
-                    className='text-xs p-2 rounded border-l-2'
-                    style={{
-                      backgroundColor: `${formattedAlert.color}10`,
-                      borderLeftColor: formattedAlert.color,
-                    }}
+                    className='text-sm p-3 bg-red-50 rounded-lg border-l-4 border-red-400'
                   >
-                    <div style={{ color: formattedAlert.color }}>
-                      {formattedAlert.message}
+                    <div className='font-medium text-red-700'>
+                      Taxi {incident.taxiId}
                     </div>
+                    <div className='text-red-600'>Speeding: {incident.speed}</div>
                   </div>
-                );
-              })}
+                ))}
+                {statistics.currentViolations.map((violation, index) => (
+                  <div
+                    key={index}
+                    className='text-sm p-3 bg-orange-50 rounded-lg border-l-4 border-orange-400'
+                  >
+                    <div className='font-medium text-orange-700'>
+                      Taxi {violation.taxiId}
+                    </div>
+                    <div className='text-orange-600'>Area Violation</div>
+                  </div>
+                ))}
+              </div>
             </div>
-          </div>
 
-          {/* Legend */}
-          <div className='bg-white rounded-lg shadow p-4'>
-            <h3 className='text-lg font-semibold mb-4 text-gray-900'>Legend</h3>
-            <div className='space-y-2 text-sm'>
-              <div className='flex items-center space-x-2'>
-                <div className='w-4 h-4 bg-blue-500 rounded'></div>
-                <span className='text-gray-900'>Normal Taxi</span>
-              </div>
-              <div className='flex items-center space-x-2'>
-                <div className='w-4 h-4 bg-red-500 rounded'></div>
-                <span className='text-gray-900'>Speeding Taxi</span>
-              </div>
-              <div className='flex items-center space-x-2'>
-                <div className='w-4 h-4 bg-orange-500 rounded'></div>
-                <span className='text-gray-900'>Geofence Violation</span>
-              </div>
-              <div className='flex items-center space-x-2'>
-                <div className='w-4 h-1 bg-orange-500 rounded'></div>
-                <span className='text-gray-900'>Warning Zone (10km)</span>
-              </div>
-              <div className='flex items-center space-x-2'>
-                <div className='w-4 h-1 bg-red-500 rounded'></div>
-                <span className='text-gray-900'>Drop Zone (15km)</span>
+            {/* Recent Alerts */}
+            <div className='bg-white rounded-lg shadow p-4'>
+              <h3 className='text-lg font-semibold mb-4 text-gray-900'>Recent Alerts</h3>
+              <div className='space-y-2 overflow-y-auto' style={{ height: '300px' }}>
+                {alerts.slice(0, 100).map((alert, index) => {
+                  const formattedAlert = formatAlert(alert);
+                  return (
+                    <div
+                      key={index}
+                      className='text-xs p-3 rounded-lg border-l-4'
+                      style={{
+                        backgroundColor: `${formattedAlert.color}10`,
+                        borderLeftColor: formattedAlert.color,
+                      }}
+                    >
+                      <div style={{ color: formattedAlert.color }} className='font-medium'>
+                        {formattedAlert.message}
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             </div>
+
+            {/* Legend */}
+            <div className='bg-white rounded-lg shadow p-4'>
+              <h3 className='text-lg font-semibold mb-4 text-gray-900'>Legend</h3>
+              <div className='space-y-3 text-sm'>
+                <div className='flex items-center space-x-3'>
+                  <div className='w-5 h-5 bg-blue-500 rounded-full border-2 border-blue-600'></div>
+                  <span className='text-gray-900'>Normal Taxi</span>
+                </div>
+                <div className='flex items-center space-x-3'>
+                  <div className='w-5 h-5 bg-red-500 rounded-full border-2 border-red-600'></div>
+                  <span className='text-gray-900'>Speeding Taxi</span>
+                </div>
+                <div className='flex items-center space-x-3'>
+                  <div className='w-5 h-5 bg-orange-500 rounded-full border-2 border-orange-600'></div>
+                  <span className='text-gray-900'>Geofence Violation</span>
+                </div>
+                <div className='flex items-center space-x-3'>
+                  <div className='w-8 h-2 bg-orange-500 rounded' style={{ background: 'repeating-linear-gradient(90deg, #ff8800, #ff8800 5px, transparent 5px, transparent 10px)' }}></div>
+                  <span className='text-gray-900'>Warning Zone (10km)</span>
+                </div>
+                <div className='flex items-center space-x-3'>
+                  <div className='w-8 h-2 bg-red-500 rounded' style={{ background: 'repeating-linear-gradient(90deg, #ff4444, #ff4444 10px, transparent 10px, transparent 15px)' }}></div>
+                  <span className='text-gray-900'>Drop Zone (15km)</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Empty column for better spacing on larger screens */}
+            <div className='hidden xl:block'></div>
           </div>
         </div>
       </div>

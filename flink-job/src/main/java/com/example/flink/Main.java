@@ -132,7 +132,7 @@ public class Main {
                 })
                 .filter(x -> x != null)
                 .keyBy(TaxiData::getTaxiId) // Key by taxi ID to track state per taxi
-                .process(new DynamicGeofenceTracker()); // Stateful processing
+                .process(new DynamicGeofenceTracker(redisHost)); // Stateful processing
 
         // Configure Redis connection
         FlinkJedisPoolConfig redisCfg = new FlinkJedisPoolConfig.Builder()
@@ -273,9 +273,15 @@ public class Main {
     }
 
     public static class DynamicGeofenceTracker
-            extends KeyedProcessFunction<String, TaxiData, TaxiData> {
+        extends KeyedProcessFunction<String, TaxiData, TaxiData> {
 
+        private final String redisHost;
         private transient ValueState<Boolean> isInZoneState;
+
+        // Constructor to accept Redis host
+        public DynamicGeofenceTracker(String redisHost) {
+            this.redisHost = redisHost;
+        }
 
         @Override
         public void open(Configuration parameters) {
@@ -303,10 +309,19 @@ public class Main {
             // Update state if status changed (e.g., entered/exited)
             if (wasInsideZone == null || wasInsideZone != isInsideZone) {
                 isInZoneState.update(isInsideZone);
+                
                 if (isInsideZone) {
                     System.out.println("Taxi " + taxi.getTaxiId() + " ENTERED the zone");
                 } else {
                     System.out.println("Taxi " + taxi.getTaxiId() + " LEFT the zone");
+                    
+                    // Delete taxi location from Redis when it leaves the 15km zone
+                    try (Jedis jedis = new Jedis(redisHost)) {
+                        jedis.hdel("taxi_locations", taxi.getTaxiId());
+                        System.out.println("Deleted taxi " + taxi.getTaxiId() + " from taxi_locations in Redis");
+                    } catch (Exception e) {
+                        System.err.println("Failed to delete taxi " + taxi.getTaxiId() + " from Redis: " + e.getMessage());
+                    }
                 }
             }
         }

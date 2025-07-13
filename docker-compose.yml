@@ -71,7 +71,7 @@ services:
       - KAFKA_BOOTSTRAP=kafka:9092
       - KAFKA_TOPIC=taxi_data
       - DATA_DIR=taxi_data
-      - SPEED_FACTOR=100.0
+      - SPEED_FACTOR=1.0
     networks:
       - flink-net
     restart: on-failure
@@ -92,8 +92,6 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
-    volumes:
-      - /data
 
   node-backend:
     build: ./node-backend
@@ -109,7 +107,7 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-    command: npm run dev
+    command: npm start
 
   frontend:
     build: ./frontend
