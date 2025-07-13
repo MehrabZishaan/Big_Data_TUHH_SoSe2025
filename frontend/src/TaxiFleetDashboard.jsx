@@ -135,7 +135,7 @@ const TaxiFleetDashboard = () => {
 
   const getTaxiSpeed = taxiId => {
     const speedData = speeds.find(s => s.taxiId === taxiId);
-    return speedData ? speedData.speed.toFixed(1) : 'N/A';
+    return speedData ? speedData.speed.toFixed(1) : '40';
   };
 
   const formatAlert = alert => {
