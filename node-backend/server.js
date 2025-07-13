@@ -9,13 +9,13 @@ const app = express();
 const server = createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: "http://localhost:5173",
+    origin: "*",
     methods: ["GET", "POST"]
   }
 });
 
 // Middleware
-app.use(cors());
+app.use(cors({ origin: '*' }));
 app.use(express.json());
 
 const redisUrl = `redis://${process.env.REDIS_HOST || 'localhost'}:${process.env.REDIS_PORT || 6379}`;
@@ -34,7 +34,7 @@ const redisClient = await redis.createClient({ url: redisUrl }).connect();
 
 redisClient.on('error', (err) => {
   console.error('Redis Client Error', err);
-  
+
 });
 
 redisClient.on('connect', () => {
@@ -163,7 +163,7 @@ io.on('connection', (socket) => {
     console.log('Message received:', data);
     io.emit('receive_message', data); // Broadcast to all clients
   });
-   
+
   socket.on('disconnect', () => {
     console.log('Client disconnected:', socket.id);
   });
