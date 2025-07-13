@@ -1,16 +1,14 @@
 image: docker:latest
 
+variables:
+  DOCKER_HOST: tcp://docker:2375/
+  DOCKER_TLS_CERTDIR: ""
+
 services:
   - docker:dind
 
-variables:
-  DOCKER_DRIVER: overlay2
-
-stages:
-  - build_and_push
-
 before_script:
-  # Login to Docker Hub
+  - docker info
   - echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
 
 build_and_push_images:
@@ -18,12 +16,9 @@ build_and_push_images:
   script:
     - docker build -t $DOCKERHUB_USERNAME/flink-job ./flink-job
     - docker push $DOCKERHUB_USERNAME/flink-job
-
     - docker build -t $DOCKERHUB_USERNAME/kafka-producer ./kafka-producer
     - docker push $DOCKERHUB_USERNAME/kafka-producer
-
     - docker build -t $DOCKERHUB_USERNAME/node-backend ./node-backend
     - docker push $DOCKERHUB_USERNAME/node-backend
-
     - docker build -t $DOCKERHUB_USERNAME/frontend ./frontend
     - docker push $DOCKERHUB_USERNAME/frontend
