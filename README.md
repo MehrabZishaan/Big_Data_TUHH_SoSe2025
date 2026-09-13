@@ -519,12 +519,6 @@ personally participated.
 
 ------------------------------------------------------------------------
 
-```{=html}
 <p align="center">
-```
-`<i>`{=html}Developed collaboratively as part of the Big Data course at
-Hamburg University of Technology (TUHH) --- Summer Semester
-2025`</i>`{=html}
-```{=html}
+<i>Developed collaboratively as part of the Big Data course at Hamburg University of Technology (TUHH) - Summer Semester 2025</i>
 </p>
-```
